@@ -10,6 +10,18 @@
 
 <h1 align="center">FilmCraft</h1>
 
+> **This is a fork.** `filmcraft-modified` is an unofficial fork of
+> [FilmCraft](https://github.com/storytold/filmcraft) that adds a few features and fixes some bugs.
+> It is not made or supported by the ArtCraft team; report problems with this fork here, not
+> upstream. Changes so far:
+>
+> - Undocked panels open in their own windows (move them to another screen); Dock Panel puts them back where they were.
+> - Keyboard Shortcuts: changing a shortcut no longer removes that key from other commands; drag a command onto a key to assign it.
+> - "Add Edit" is renamed "Cut/Split".
+> - Linux sound: less stutter/crackle on PipeWire/PulseAudio, picture and sound stay in sync, and voice-over recording finds a working mic.
+> - Voice-over recording is in the Sequence menu.
+> - Faster menus.
+
 <p align="center">
   <b>Video editing, color and sound; an open-source, clean-room reimplementation of Adobe Premiere Pro, rebuilt in pure Rust.</b>
 </p>
