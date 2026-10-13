@@ -34,6 +34,10 @@ fn host(name: &str) -> cpal::Host {
     cpal::default_host()
 }
 
+/// The input device named in the settings (empty or missing = the host's default). When the
+/// default cannot be opened (a broken ALSA `default`, #23/#106, which left voice-over recording
+/// with "no input device" on Linux), the first device that can, sound-server bridges first, as
+/// for output ([`crate::audio::fallback_rank`]).
 fn device(h: &cpal::Host, name: &str) -> Option<cpal::Device> {
     if !name.is_empty()
         && let Ok(mut devs) = h.input_devices()
@@ -41,8 +45,21 @@ fn device(h: &cpal::Host, name: &str) -> Option<cpal::Device> {
     {
         return Some(d);
     }
-    h.default_input_device()
+    if let Some(d) = h.default_input_device()
+        && d.default_input_config().is_ok()
+    {
+        return Some(d);
+    }
+    let mut devs: Vec<(String, cpal::Device)> = h.input_devices().ok()?.filter_map(|d| d.name().ok().map(|n| (n, d))).collect();
+    devs.sort_by_key(|(n, _)| crate::audio::fallback_rank(n));
+    let (found, d) = devs.into_iter().find(|(_, d)| d.default_input_config().is_ok())?;
+    log::warn!("the default audio input device cannot be opened; recording from '{found}'");
+    Some(d)
 }
+
+/// How long opening the input device may take before recording gives up (a driver that never
+/// answers must not freeze the window).
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -178,11 +195,22 @@ impl AudioInput for CpalIn {
                 .map_err(|e| e.to_string())?,
         );
         self.stop = Some(stop_tx);
-        match fmt_rx.recv().map_err(|e| e.to_string()).and_then(|f| f) {
-            Ok(fmt) => Ok(fmt),
-            Err(e) => {
+        match fmt_rx.recv_timeout(OPEN_TIMEOUT) {
+            Ok(Ok(fmt)) => Ok(fmt),
+            Ok(Err(e)) => {
                 self.stop();
                 Err(e)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Leave the stuck worker behind instead of joining it: it stops its stream (if it
+                // ever opens one) when it sees the stop sender gone.
+                self.stop = None;
+                self.worker = None;
+                Err("the audio input device did not respond".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.stop();
+                Err("the audio input worker stopped".into())
             }
         }
     }

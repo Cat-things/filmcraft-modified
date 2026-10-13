@@ -270,13 +270,22 @@ pub fn drag_ghost(app: &FilmcraftApp, ui: &egui::Ui) {
     }
 }
 
-/// The panel "≡" menu.
+/// The main window's overlays: the drag ghost, bins opened in new windows and the panel menu.
 pub fn panel_menu_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     drag_ghost(app, ui);
     // bins opened in new windows (Project panel)
     project::floating(app, ui.ctx());
+    panel_menu(app, ui);
+}
+
+/// The panel "≡" menu, in the window (egui viewport) whose panel opened it.
+pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     let id = egui::Id::new("panel-menu");
     let Some((p, pos)) = ui.ctx().data(|d| d.get_temp::<(PanelKind, egui::Pos2)>(id)) else { return };
+    let viewport = ui.ctx().data(|d| d.get_temp::<egui::ViewportId>(egui::Id::new("panel-menu-viewport"))).unwrap_or(egui::ViewportId::ROOT);
+    if viewport != ui.ctx().viewport_id() {
+        return;
+    }
     let mut close = false;
     let area = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -302,11 +311,23 @@ pub fn panel_menu_popup(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
                         let _ = crate::menus::invoke(app, ui.ctx(), "window.closePanel", serde_json::json!({"panel": p.id()}));
                         close = true;
                     }
-                    let undock = ui.button(tl!("Undock Panel"));
-                    app.auto.add_response(&format!("panel.menu.{}.undock", p.id()), &undock, "Undock Panel");
-                    if undock.clicked() {
-                        let _ = crate::menus::invoke(app, ui.ctx(), "window.floatPanel", serde_json::json!({"panel": p.id()}));
-                        close = true;
+                    if app.ui.floating.iter().any(|group| group.panels.contains(&p)) {
+                        // undocked: back into the docked layout
+                        let dock = ui.button(tl!("Dock Panel"));
+                        app.auto.add_response(&format!("panel.menu.{}.dock", p.id()), &dock, "Dock Panel");
+                        if dock.clicked() {
+                            if let Err(e) = crate::menus::invoke(app, ui.ctx(), "window.dockPanel", serde_json::json!({"panel": p.id()})) {
+                                app.ui.status = e;
+                            }
+                            close = true;
+                        }
+                    } else {
+                        let undock = ui.button(tl!("Undock Panel"));
+                        app.auto.add_response(&format!("panel.menu.{}.undock", p.id()), &undock, "Undock Panel");
+                        if undock.clicked() {
+                            let _ = crate::menus::invoke(app, ui.ctx(), "window.floatPanel", serde_json::json!({"panel": p.id()}));
+                            close = true;
+                        }
                     }
                     let maximized = app.ui.keys.maximized.is_some_and(|q| app.ui.dock.contains(q) || app.ui.floating.iter().any(|g| g.panels.contains(&q)));
                     let r = ui.button(if maximized { tl!("Restore Frame") } else { tl!("Maximize Frame") });

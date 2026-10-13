@@ -305,7 +305,7 @@ pub fn insert(seq: &mut Sequence, placements: Vec<(TrackId, TrackItem)>, ctx: &m
     Ok(ids)
 }
 
-/// Add Edit (razor) at `t` on the given tracks (all unlocked tracks when empty). Returns new ids.
+/// Cut/Split (razor; Premiere's Add Edit) at `t` on the given tracks (all unlocked tracks when empty). Returns new ids.
 pub fn razor(seq: &mut Sequence, tracks: &[TrackId], t: Tick, ctx: &mut EditCtx) -> Vec<ClipId> {
     let mut links = HashMap::new();
     let mut out = Vec::new();

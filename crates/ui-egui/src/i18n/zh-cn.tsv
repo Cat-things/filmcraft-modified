@@ -13,8 +13,8 @@
 	Add Audio Submix Track	添加音频子混音轨道
 	Add Caption at Playhead	在播放头处添加字幕
 	Add Chapter Marker…	添加章节标记…
-	Add Edit	添加编辑
-	Add Edit to All Tracks	在所有轨道添加编辑点
+	Cut/Split	切割/拆分
+	Cut/Split All Tracks	切割/拆分所有轨道
 	Add Flash Cue Marker…	添加闪现提示标记…
 	Add Frame Hold	添加帧定格
 	Add Guide…	添加参考线…
@@ -2856,7 +2856,11 @@
 	Assign {key} to {command}	将 {key} 分配给 {command}
 	Conflict: {key} is assigned to {commands} ({ctx})	冲突：{key} 已分配给 {commands}（{ctx}）
 	 and 	和
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	单击命令的快捷键单元格并按键进行分配；+ 可添加另一个快捷键。
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	单击快捷键可更改，单击单元格空白处或 + 可添加，也可将命令拖到按键上。
+	 (also on {list}; {command} runs first)	（也分配给 {list}；优先执行 {command}）
+	Use for {command} only	仅用于 {command}
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	将命令拖放到按键上进行分配；按住或选择修饰键可组合。
+	Click to change this shortcut	单击以更改此快捷键
 	Cleared {n} shortcut(s) of {command}	已清除 {command} 的 {n} 个快捷键
 	No export preset named `{name}`	没有名为`{name}`的导出预设
 	Open a sequence to export	打开一个序列以导出
@@ -3585,3 +3589,5 @@
 	Shows the version, community links and credits in a FilmCraft window.	在 FilmCraft 窗口中显示版本、社区链接和致谢。
 	Couldn't open your web browser	无法打开网页浏览器
 	Open this address in your browser yourself:	请自行在浏览器中打开此地址：
+	Undock Panels into Separate Windows	将面板取消停靠到单独的窗口
+	Dock Panel	停靠面板

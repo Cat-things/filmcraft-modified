@@ -321,6 +321,72 @@ fn dock_panel_without_anchor_docks_along_a_workspace_edge() {
     assert_eq!(app.ui.dock, DockNode::Tabs { panels: vec![PanelKind::Project], active: 0 });
 }
 
+#[test]
+fn dock_panel_without_a_target_returns_an_undocked_panel_and_the_window_toggle_is_saved() {
+    let dir = std::env::temp_dir().join(format!("filmcraft-undock-windows-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut session = Session::default();
+    session.prefs_path = Some(dir.join("preferences.json"));
+    let mut app = FilmcraftApp::new(session);
+    app.ui.dock = layout().root;
+    let ctx = egui::Context::default();
+    // the panel menu's Dock Panel: back where Window ▸ Info opens it
+    menus::invoke(&mut app, &ctx, "window.floatPanel", json!({"panel": "Info"})).unwrap();
+    assert!(app.ui.floating.iter().any(|group| group.panels.contains(&PanelKind::Info)));
+    menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": "Info"})).unwrap();
+    assert!(app.ui.floating.is_empty());
+    assert!(app.ui.dock.contains(PanelKind::Info));
+    // a docked panel stays where it is
+    let before = app.ui.dock.clone();
+    menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": "Info"})).unwrap();
+    assert_eq!(app.ui.dock, before);
+    // Window ▸ Undock Panels into Separate Windows: on by default, toggled, saved with the workspaces
+    let checked = |app: &FilmcraftApp| menus::menu_items(app).into_iter().find(|it| it.id == "window.undockToWindows").and_then(|it| it.checked);
+    assert_eq!(checked(&app), Some(true));
+    let r = menus::invoke(&mut app, &ctx, "window.undockToWindows", json!({})).unwrap();
+    assert_eq!(r["separateWindows"], json!(false));
+    assert_eq!(checked(&app), Some(false));
+    assert!(dock::WorkspacePrefs::load(&dir.join(dock::WORKSPACES_FILE)).float_in_window);
+    let r = menus::invoke(&mut app, &ctx, "window.undockToWindows", json!({"on": true})).unwrap();
+    assert_eq!(r["separateWindows"], json!(true));
+    assert!(!dock::WorkspacePrefs::load(&dir.join(dock::WORKSPACES_FILE)).float_in_window);
+    assert!(menus::invoke(&mut app, &ctx, "window.undockToWindows", json!({"on": "yes"})).is_err());
+    assert_eq!(checked(&app), Some(true));
+    // without a host that opens native windows (these tests, the web) undocked panels float in the main window
+    assert!(!app.hooks.separate_windows);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The groups and splits of a tree, without sizes or active tabs.
+fn shape(node: &DockNode) -> String {
+    match node {
+        DockNode::Tabs { panels, .. } => format!("{panels:?}"),
+        DockNode::Split { vertical, a, b, .. } => format!("{}({}, {})", if *vertical { "V" } else { "H" }, shape(a), shape(b)),
+    }
+}
+
+#[test]
+fn an_undocked_panel_docks_back_into_its_place_in_the_workspace() {
+    // Dock Panel (and closing an undocked panel's window) used to add it as a tab of the Project
+    // panel's group, wherever it came from: Program ended up beside the Project panel.
+    let ctx = egui::Context::default();
+    for name in dock::WORKSPACES {
+        let original = dock::workspace(name);
+        let mut panels = Vec::new();
+        original.panels(&mut panels);
+        for panel in panels {
+            let mut app = FilmcraftApp::new(Session::default());
+            app.ui.workspace = name.to_string();
+            app.ui.dock = original.clone();
+            menus::invoke(&mut app, &ctx, "window.floatPanel", json!({"panel": panel.id()})).unwrap();
+            assert!(!app.ui.dock.contains(panel));
+            menus::invoke(&mut app, &ctx, "window.dockPanel", json!({"panel": panel.id()})).unwrap();
+            assert!(app.ui.floating.is_empty(), "{name}: {panel:?}");
+            assert_eq!(shape(&app.ui.dock), shape(&original), "{name}: {panel:?} came back somewhere else");
+        }
+    }
+}
+
 fn same_group(root: &DockNode, first: PanelKind, second: PanelKind) -> bool {
     match root {
         DockNode::Tabs { panels, .. } => panels.contains(&first) && panels.contains(&second),

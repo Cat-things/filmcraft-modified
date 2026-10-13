@@ -452,12 +452,12 @@ fn keyboard_shortcuts_dialog_assigns_live_and_cancel_restores() {
     assert_eq!(d.inspect()["dialog"], json!("Shortcuts"));
     let keys = d.element_ids("shortcuts.key.");
     assert!(keys.len() > 60, "drawn keyboard: {}", keys.len());
-    // search, then click the Shortcut cell and press new keys
+    // search, then click the shortcut's chip and press new keys: that shortcut changes
     d.ok("ui.click", json!({"id": "shortcuts.search"}));
-    d.ok("ui.type", json!({"text": "add edit"}));
+    d.ok("ui.type", json!({"text": "cut/split"}));
     d.frames(2);
     assert!(d.element_ids("shortcuts.row.").iter().any(|x| x == "shortcuts.row.sequence.addEdit"));
-    d.ok("ui.click", json!({"id": "shortcuts.cell.sequence.addEdit"}));
+    d.ok("ui.click", json!({"id": "shortcuts.chip.sequence.addEdit.0"}));
     d.frames(1);
     d.ok("ui.key", json!({"key": "Cmd+Shift+J"}));
     d.frames(2);
@@ -465,14 +465,18 @@ fn keyboard_shortcuts_dialog_assigns_live_and_cancel_restores() {
     let cmds = d.ok("engine.commands", json!({}));
     let ae = cmds.as_array().unwrap().iter().find(|c| c["id"] == "sequence.addEdit").unwrap().clone();
     assert_eq!(ae["shortcut"], json!("Cmd+Shift+J"), "command list too: {ae}");
-    // reassigning a used key takes it from the other command (and says so)
-    d.ok("ui.click", json!({"id": "shortcuts.cell.sequence.addEdit"}));
+    // a used key is not taken from the other command: the conflict is listed, the new one runs first
+    d.ok("ui.click", json!({"id": "shortcuts.chip.sequence.addEdit.0"}));
     d.frames(1);
     d.ok("ui.key", json!({"key": "Cmd+Shift+K"}));
     d.frames(2);
-    assert_eq!(menu_shortcut(&mut d, "sequence.addEditAllTracks"), Value::Null);
+    assert_eq!(menu_shortcut(&mut d, "sequence.addEditAllTracks"), json!("Cmd+Shift+K"), "the other command keeps its key");
+    assert_eq!(menu_shortcut(&mut d, "sequence.addEdit"), json!("Cmd+Shift+K"));
+    let hit = d.ok("engine.execute", json!({"command": "shortcuts.resolve", "params": {"keys": "Cmd+Shift+K"}}));
+    assert_eq!(hit["command"], json!("sequence.addEdit"), "{hit}");
     let msg = d.element_ids("shortcuts.message");
     assert_eq!(msg.len(), 1);
+    assert!(!d.element_ids("shortcuts.conflict.keep.").is_empty(), "the conflict offers to keep the key for one command");
     // Undo / Redo inside the dialog
     d.ok("ui.click", json!({"id": "shortcuts.undo"}));
     d.frames(1);
@@ -481,6 +485,10 @@ fn keyboard_shortcuts_dialog_assigns_live_and_cancel_restores() {
     d.ok("ui.click", json!({"id": "shortcuts.redo"}));
     d.frames(1);
     assert_eq!(menu_shortcut(&mut d, "sequence.addEdit"), json!("Cmd+Shift+K"));
+    // resolving the conflict takes the key from the other command
+    d.ok("ui.click", json!({"id": "shortcuts.conflict.keep.0"}));
+    d.frames(2);
+    assert_eq!(menu_shortcut(&mut d, "sequence.addEditAllTracks"), Value::Null);
     // Cancel restores everything
     d.ok("ui.click", json!({"id": "shortcuts.cancel"}));
     d.frames(2);
@@ -492,7 +500,7 @@ fn keyboard_shortcuts_dialog_assigns_live_and_cancel_restores() {
     d.ok("ui.menu.invoke", json!({"id": "app.keyboardShortcuts"}));
     d.frames(2);
     d.ok("ui.click", json!({"id": "shortcuts.search"}));
-    d.ok("ui.type", json!({"text": "add edit"}));
+    d.ok("ui.type", json!({"text": "cut/split"}));
     d.frames(2);
     d.ok("ui.click", json!({"id": "shortcuts.add.sequence.addEdit"}));
     d.frames(1);
@@ -562,7 +570,7 @@ fn recording_a_shortcut_skips_the_modifier_key_presses() {
     d.ok("ui.menu.invoke", json!({"id": "app.keyboardShortcuts"}));
     d.frames(2);
     d.ok("ui.click", json!({"id": "shortcuts.search"}));
-    d.ok("ui.type", json!({"text": "add edit"}));
+    d.ok("ui.type", json!({"text": "cut/split"}));
     d.frames(2);
     d.ok("ui.click", json!({"id": "shortcuts.add.sequence.addEdit"}));
     d.frames(1);
@@ -581,6 +589,40 @@ fn recording_a_shortcut_skips_the_modifier_key_presses() {
     let got = d.ok("engine.execute", json!({"command": "shortcuts.get", "params": {"command": "sequence.addEdit"}})).to_string();
     assert!(got.contains("Alt+Shift+J"), "{got}");
     assert!(got.contains("Cmd+K"), "{got}");
+}
+
+/// Premiere-style: drag a command from the list onto a key of the drawn keyboard (on the layer of
+/// the modifiers selected there) to give it that shortcut; its other shortcuts stay.
+#[test]
+fn dragging_a_command_onto_a_key_of_the_keyboard_assigns_it() {
+    let mut d = Driver::demo();
+    d.ok("ui.menu.invoke", json!({"id": "app.keyboardShortcuts"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "shortcuts.search"}));
+    d.ok("ui.type", json!({"text": "cut/split"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "shortcuts.mod.Alt"}));
+    d.frames(1);
+    d.ok("ui.drag", json!({"from": {"id": "shortcuts.row.sequence.addEdit"}, "to": {"id": "shortcuts.key.F5"}}));
+    d.frames(3);
+    assert!(d.harness.state().shortcut_editor.dragging.is_none(), "the drag ended on the key");
+    let got = d.ok("engine.execute", json!({"command": "shortcuts.get", "params": {"command": "sequence.addEdit"}})).to_string();
+    assert!(got.contains("\"Alt+F5\""), "{got}");
+    assert!(got.contains("\"Cmd+K\""), "dropping adds a shortcut: {got}");
+    // a drop away from the keyboard assigns nothing
+    d.ok("ui.drag", json!({"from": {"id": "shortcuts.row.sequence.addEdit"}, "to": {"id": "shortcuts.search"}}));
+    d.frames(3);
+    let again = d.ok("engine.execute", json!({"command": "shortcuts.get", "params": {"command": "sequence.addEdit"}})).to_string();
+    assert_eq!(again, got);
+    d.ok("ui.click", json!({"id": "shortcuts.ok"}));
+    d.frames(2);
+    // the new key runs the command
+    let n0 = track_clips(&d.sequence(), 0).len();
+    d.exec("playhead.set", json!({"seconds": 2.0}));
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    d.ok("ui.key", json!({"key": "Alt+F5"}));
+    d.frames(2);
+    assert_eq!(track_clips(&d.sequence(), 0).len(), n0 + 1, "Alt+F5 cuts");
 }
 
 #[test]

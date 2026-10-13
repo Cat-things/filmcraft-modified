@@ -5,6 +5,14 @@
 //! cpal reports as `poll() returned POLLERR`; an unplugged device) is restarted by
 //! [`AudioOut::recover`], keeping the played-frame clock and the play-ahead mixer, so sound
 //! resumes where it stopped instead of playback going silent (#840).
+//!
+//! The playback clock is what the listener hears ([`Audible`]): frames handed to the device minus
+//! the ones still queued in it. Without that, the picture ran ahead of the sound by the device's
+//! output latency, which is large through PipeWire / PulseAudio on Linux.
+//!
+//! On ALSA the I/O buffer size setting is the period (frames mixed per callback) and the ring holds
+//! four of them, at least [`ALSA_MIN_RING`]: cpal takes a fixed size as the whole ring, so the
+//! default 512 left ~10 ms of slack and crackled or failed with xruns on Linux desktops.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,7 +31,10 @@ pub struct CpalOut {
     stream: Option<cpal::Stream>,
     /// The running playback's mixer, shared with the stream so a restarted stream continues it.
     fill: Option<Arc<Mutex<Fill>>>,
+    /// Frames handed to the device since `start`.
     played: Arc<AtomicU64>,
+    /// Frames heard since `start` (the playback clock).
+    audible: Arc<Audible>,
     health: Arc<Health>,
     watchdog: Watchdog,
     /// Time base for the watchdog.
@@ -39,6 +50,65 @@ pub struct CpalOut {
     /// The fallback picked when the default device could not be opened, as (host, device) names,
     /// so later lookups (`devices`, `configure`, `start`) reuse it instead of probing every PCM.
     fallback: Mutex<Option<(String, String)>>,
+    /// The device chosen by name in the settings, as (host, name, device): finding it means
+    /// listing every device, which on ALSA opens every PCM and took long enough to delay the
+    /// start of each playback.
+    named: Mutex<Option<(String, String, cpal::Device)>>,
+}
+
+/// The ALSA ring never holds less than this (≈43 ms at 48 kHz): PipeWire's and PulseAudio's ALSA
+/// plugins run their own graph on top, and a GUI app's mixer thread is not real-time.
+const ALSA_MIN_RING: u32 = 2048;
+const ALSA_MAX_RING: u32 = 16_384;
+
+/// The fixed buffer size to ask cpal for: the I/O buffer size setting is the number of frames
+/// mixed per callback (as in the setting's other hosts), and cpal's ALSA backend takes a fixed
+/// size as the whole ring split into four periods.
+fn device_buffer_frames(host: &str, setting: u32) -> u32 {
+    if host.eq_ignore_ascii_case("alsa") { setting.saturating_mul(4).clamp(ALSA_MIN_RING, ALSA_MAX_RING) } else { setting.max(1) }
+}
+
+/// A device's reported output latency is trusted up to this (a broken driver's value is not).
+const MAX_LATENCY: Duration = Duration::from_secs(2);
+
+/// The audible playback position. The audio thread records, per callback, how many frames had
+/// been heard then (frames handed to the device before the buffer, minus the device's latency:
+/// cpal's gap between the callback and playback timestamps); the UI thread interpolates from there
+/// on the wall clock, never past the frames handed over and never backwards.
+#[derive(Default)]
+struct Audible {
+    /// (frames heard, when the callback ran, as time since the output's epoch).
+    last: Mutex<Option<(u64, Duration)>>,
+    /// The largest value reported (the clock never runs backwards).
+    shown: AtomicU64,
+}
+
+impl Audible {
+    /// Audio thread: a buffer was asked for after `before` frames had been handed over; its first
+    /// frame plays `latency` later. Skipped when the UI thread holds the lock (never blocks).
+    fn on_callback(&self, before: u64, latency: Duration, rate: u32, at: Duration) {
+        let queued = (latency.min(MAX_LATENCY).as_secs_f64() * f64::from(rate)) as u64;
+        if let Ok(mut last) = self.last.try_lock() {
+            *last = Some((before.saturating_sub(queued), at));
+        }
+    }
+
+    /// UI thread: frames heard by `now`, of the `delivered` frames handed over.
+    fn frames(&self, delivered: u64, rate: u32, now: Duration) -> u64 {
+        let last = *self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        let heard = match last {
+            Some((frames, at)) => frames.saturating_add((now.saturating_sub(at).as_secs_f64() * f64::from(rate)) as u64),
+            None => 0,
+        }
+        .min(delivered);
+        self.shown.fetch_max(heard, Ordering::SeqCst).max(heard)
+    }
+}
+
+/// The output latency cpal reports for one callback.
+fn callback_latency(info: &cpal::OutputCallbackInfo) -> Duration {
+    let ts = info.timestamp();
+    ts.playback.duration_since(&ts.callback).unwrap_or(Duration::ZERO)
 }
 
 /// A hardware note for the status bar, translated when it is shown.
@@ -82,7 +152,7 @@ struct DeviceChoice {
 /// (`pipewire`, `pulse`: they share the card with every other app), then other named PCMs, and
 /// raw `hw:`/`plughw:` devices last (opening one takes the card exclusively and silences the
 /// rest of the desktop).
-fn fallback_rank(name: &str) -> u8 {
+pub(crate) fn fallback_rank(name: &str) -> u8 {
     let n = name.to_ascii_lowercase();
     if n == "pipewire" || n.starts_with("pipewire:") {
         0
@@ -99,12 +169,27 @@ fn fallback_rank(name: &str) -> u8 {
 /// default cannot be opened — a broken ALSA `default` (missing `99-pipewire-default.conf`,
 /// #23/#106) — a fallback that can, so the app is not silently mute. The fallback list is probed
 /// only after the default fails, in [`fallback_rank`] order, and the pick is cached in `cache`.
-fn output_device(h: &cpal::Host, name: &str, cache: &Mutex<Option<(String, String)>>) -> Option<DeviceChoice> {
-    if !name.is_empty()
-        && let Ok(mut devs) = h.output_devices()
-        && let Some(d) = devs.find(|d| d.name().is_ok_and(|n| n == name))
-    {
-        return Some(DeviceChoice { device: d, fallback: None });
+fn output_device(
+    h: &cpal::Host,
+    name: &str,
+    cache: &Mutex<Option<(String, String)>>,
+    named: &Mutex<Option<(String, String, cpal::Device)>>,
+) -> Option<DeviceChoice> {
+    if !name.is_empty() {
+        let host_name = h.id().name();
+        let mut named = named.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((cached_host, cached, d)) = named.as_ref()
+            && cached_host == host_name
+            && cached == name
+        {
+            return Some(DeviceChoice { device: d.clone(), fallback: None });
+        }
+        if let Ok(mut devs) = h.output_devices()
+            && let Some(d) = devs.find(|d| d.name().is_ok_and(|n| n == name))
+        {
+            *named = Some((host_name.to_string(), name.to_string(), d.clone()));
+            return Some(DeviceChoice { device: d, fallback: None });
+        }
     }
     if let Some(d) = h.default_output_device()
         && d.default_output_config().is_ok()
@@ -132,7 +217,8 @@ impl CpalOut {
     pub fn new() -> Self {
         let host = cpal::default_host();
         let fallback = Mutex::new(None);
-        let choice = output_device(&host, "", &fallback);
+        let named = Mutex::new(None);
+        let choice = output_device(&host, "", &fallback, &named);
         let cfg = choice.as_ref().and_then(|c| c.device.default_output_config().ok());
         let note = match choice {
             Some(c) => c.fallback,
@@ -145,6 +231,7 @@ impl CpalOut {
             stream: None,
             fill: None,
             played: Arc::new(AtomicU64::new(0)),
+            audible: Arc::new(Audible::default()),
             health: Arc::new(Health::default()),
             watchdog: Watchdog::default(),
             epoch: Instant::now(),
@@ -154,6 +241,7 @@ impl CpalOut {
             document_rate: None,
             note,
             fallback,
+            named,
         }
     }
 
@@ -171,18 +259,33 @@ impl CpalOut {
         Ok(exact.unwrap_or(default))
     }
 
-    fn converted_stream<T>(&self, dev: &cpal::Device, config: &cpal::StreamConfig, fill: Arc<Mutex<Fill>>) -> Result<cpal::Stream, cpal::BuildStreamError>
+    /// One device callback, as both stream kinds run it: mix into `buf`, advance the frames
+    /// handed over, and note what has been heard.
+    fn callback(&self, rate: u32, fill: Arc<Mutex<Fill>>) -> impl FnMut(&mut [f32], usize, &cpal::OutputCallbackInfo) + Send + 'static {
+        let (played, audible, health, epoch) = (self.played.clone(), self.audible.clone(), self.health.clone(), self.epoch);
+        move |buf, channels, info| {
+            let before = played.load(Ordering::SeqCst);
+            render(&fill, buf, channels, &played, &health);
+            audible.on_callback(before, callback_latency(info), rate, epoch.elapsed());
+        }
+    }
+
+    fn converted_stream<T>(
+        &self,
+        dev: &cpal::Device,
+        config: &cpal::StreamConfig,
+        mut callback: impl FnMut(&mut [f32], usize, &cpal::OutputCallbackInfo) + Send + 'static,
+    ) -> Result<cpal::Stream, cpal::BuildStreamError>
     where
         T: cpal::SizedSample + cpal::FromSample<f32>,
     {
         let channels = usize::from(config.channels);
-        let played = self.played.clone();
         let health = self.health.clone();
         let error_health = health.clone();
         let mut scratch = Vec::new();
         dev.build_output_stream(
             config,
-            move |buf: &mut [T], _| {
+            move |buf: &mut [T], info| {
                 // Reuse the conversion buffer. A pathological driver buffer must not panic the audio thread.
                 if buf.len() > 1_048_576 || scratch.try_reserve(buf.len().saturating_sub(scratch.len())).is_err() {
                     buf.fill(T::EQUILIBRIUM);
@@ -192,7 +295,7 @@ impl CpalOut {
                     return;
                 }
                 scratch.resize(buf.len(), 0.0);
-                render(&fill, &mut scratch, channels, &played, &health);
+                callback(&mut scratch, channels, info);
                 convert_samples(&scratch, buf);
             },
             move |e| stream_error(&error_health, e),
@@ -200,11 +303,36 @@ impl CpalOut {
         )
     }
 
+    /// Build (not start) an output stream playing `fill` in `format`.
+    fn build(&self, dev: &cpal::Device, config: &cpal::StreamConfig, format: cpal::SampleFormat, fill: Arc<Mutex<Fill>>) -> Result<cpal::Stream, String> {
+        let channels = usize::from(config.channels);
+        let cb = self.callback(config.sample_rate.0, fill);
+        match format {
+            cpal::SampleFormat::F32 => {
+                let mut cb = cb;
+                let error_health = self.health.clone();
+                dev.build_output_stream(config, move |buf: &mut [f32], info| cb(buf, channels, info), move |e| stream_error(&error_health, e), None)
+            }
+            cpal::SampleFormat::I8 => self.converted_stream::<i8>(dev, config, cb),
+            cpal::SampleFormat::I16 => self.converted_stream::<i16>(dev, config, cb),
+            cpal::SampleFormat::I24 => self.converted_stream::<cpal::I24>(dev, config, cb),
+            cpal::SampleFormat::I32 => self.converted_stream::<i32>(dev, config, cb),
+            cpal::SampleFormat::I64 => self.converted_stream::<i64>(dev, config, cb),
+            cpal::SampleFormat::U8 => self.converted_stream::<u8>(dev, config, cb),
+            cpal::SampleFormat::U16 => self.converted_stream::<u16>(dev, config, cb),
+            cpal::SampleFormat::U32 => self.converted_stream::<u32>(dev, config, cb),
+            cpal::SampleFormat::U64 => self.converted_stream::<u64>(dev, config, cb),
+            cpal::SampleFormat::F64 => self.converted_stream::<f64>(dev, config, cb),
+            other => return Err(format!("unsupported sample format {other:?}")),
+        }
+        .map_err(|e| e.to_string())
+    }
+
     /// Open the configured output device and play `fill` on it. `expect` is the (sample rate,
     /// channels) a restarted stream must keep: the mixer was set up for them.
     fn open(&mut self, fill: Arc<Mutex<Fill>>, expect: Option<(u32, u16)>) -> Result<(), String> {
         let host = host(&self.hw.device_class);
-        let DeviceChoice { device: dev, fallback } = output_device(&host, &self.hw.default_output, &self.fallback).ok_or("no output device")?;
+        let DeviceChoice { device: dev, fallback } = output_device(&host, &self.hw.default_output, &self.fallback, &self.named).ok_or("no output device")?;
         self.note = fallback;
         let cfg = self.config(&dev)?;
         let channels = cfg.channels() as usize;
@@ -217,38 +345,25 @@ impl CpalOut {
             return Err(format!("the output device now runs at {} Hz with {} channels", cfg.sample_rate().0, cfg.channels()));
         }
         let mut config: cpal::StreamConfig = cfg.clone().into();
+        let frames = device_buffer_frames(host.id().name(), self.hw.buffer_size);
         if let cpal::SupportedBufferSize::Range { min, max } = cfg.buffer_size()
-            && (*min..=*max).contains(&self.hw.buffer_size)
+            && (*min..=*max).contains(&frames)
         {
-            config.buffer_size = cpal::BufferSize::Fixed(self.hw.buffer_size);
+            config.buffer_size = cpal::BufferSize::Fixed(frames);
         }
         self.rate = cfg.sample_rate().0;
         self.channels = cfg.channels();
-        let stream = match cfg.sample_format() {
-            cpal::SampleFormat::F32 => {
-                let played = self.played.clone();
-                let health = self.health.clone();
-                let error_health = health.clone();
-                dev.build_output_stream(
-                    &config,
-                    move |buf: &mut [f32], _| render(&fill, buf, channels, &played, &health),
-                    move |e| stream_error(&error_health, e),
-                    None,
-                )
+        let stream = match self.build(&dev, &config, cfg.sample_format(), fill.clone()) {
+            Ok(stream) => stream,
+            // A buffer size the device refuses (cpal sets an ALSA ring to exactly that size):
+            // let the backend choose rather than playing without sound.
+            Err(e) if matches!(config.buffer_size, cpal::BufferSize::Fixed(_)) => {
+                log::warn!("the audio output refused a {frames}-frame buffer ({e}); using the device's default");
+                config.buffer_size = cpal::BufferSize::Default;
+                self.build(&dev, &config, cfg.sample_format(), fill)?
             }
-            cpal::SampleFormat::I8 => self.converted_stream::<i8>(&dev, &config, fill),
-            cpal::SampleFormat::I16 => self.converted_stream::<i16>(&dev, &config, fill),
-            cpal::SampleFormat::I24 => self.converted_stream::<cpal::I24>(&dev, &config, fill),
-            cpal::SampleFormat::I32 => self.converted_stream::<i32>(&dev, &config, fill),
-            cpal::SampleFormat::I64 => self.converted_stream::<i64>(&dev, &config, fill),
-            cpal::SampleFormat::U8 => self.converted_stream::<u8>(&dev, &config, fill),
-            cpal::SampleFormat::U16 => self.converted_stream::<u16>(&dev, &config, fill),
-            cpal::SampleFormat::U32 => self.converted_stream::<u32>(&dev, &config, fill),
-            cpal::SampleFormat::U64 => self.converted_stream::<u64>(&dev, &config, fill),
-            cpal::SampleFormat::F64 => self.converted_stream::<f64>(&dev, &config, fill),
-            other => return Err(format!("unsupported sample format {other:?}")),
-        }
-        .map_err(|e| e.to_string())?;
+            Err(e) => return Err(e),
+        };
         stream.play().map_err(|e| e.to_string())?;
         self.stream = Some(stream);
         Ok(())
@@ -261,6 +376,8 @@ impl CpalOut {
         // The old stream (and its audio thread) goes first: only one stream ever runs the mixer.
         self.stream = None;
         self.health.clear_errors();
+        // a device that went away may come back as a new device under the same name
+        *self.named.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.open(fill, Some(expect))
     }
 }
@@ -385,6 +502,7 @@ impl AudioOut for CpalOut {
     fn start(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.stop();
         self.played.store(0, Ordering::SeqCst);
+        self.audible = Arc::new(Audible::default());
         self.health = Arc::new(Health::default());
         self.watchdog.reset(self.epoch.elapsed());
         let fill = Arc::new(Mutex::new(fill));
@@ -425,14 +543,19 @@ impl AudioOut for CpalOut {
         self.channels as usize
     }
     fn played_frames(&self) -> Option<u64> {
-        self.stream.as_ref().filter(|_| !self.health.failed.load(Ordering::SeqCst)).map(|_| self.played.load(Ordering::SeqCst))
+        self.stream
+            .as_ref()
+            .filter(|_| !self.health.failed.load(Ordering::SeqCst))
+            .map(|_| self.audible.frames(self.played.load(Ordering::SeqCst), self.rate, self.epoch.elapsed()))
     }
     fn devices(&self) -> AudioDevices {
         let h = host(&self.hw.device_class);
         let outputs = h.output_devices().map(|d| d.filter_map(|x| x.name().ok()).collect()).unwrap_or_default();
         let inputs = h.input_devices().map(|d| d.filter_map(|x| x.name().ok()).collect()).unwrap_or_default();
-        let output_channels =
-            output_device(&h, &self.hw.default_output, &self.fallback).and_then(|c| self.config(&c.device).ok()).map(|cfg| cfg.channels()).unwrap_or(0);
+        let output_channels = output_device(&h, &self.hw.default_output, &self.fallback, &self.named)
+            .and_then(|c| self.config(&c.device).ok())
+            .map(|cfg| cfg.channels())
+            .unwrap_or(0);
         AudioDevices { hosts: cpal::available_hosts().iter().map(|h| h.name().to_string()).collect(), inputs, outputs, output_channels }
     }
     fn configure(&mut self, hw: &AudioHardwarePrefs, document_rate: Option<u32>) {
@@ -440,7 +563,7 @@ impl AudioOut for CpalOut {
         self.document_rate = document_rate;
         // the rate playback mixes at must be known before `start`
         let host = host(&self.hw.device_class);
-        if let Some(choice) = output_device(&host, &self.hw.default_output, &self.fallback)
+        if let Some(choice) = output_device(&host, &self.hw.default_output, &self.fallback, &self.named)
             && let Ok(cfg) = self.config(&choice.device)
         {
             self.rate = cfg.sample_rate().0;
@@ -463,6 +586,48 @@ mod tests {
         let mut names = vec!["plughw:CARD=PCH,DEV=0", "hw:CARD=PCH,DEV=0", "sysdefault:CARD=PCH", "pulse", "pipewire"];
         names.sort_by_key(|n| fallback_rank(n));
         assert_eq!(names, ["pipewire", "pulse", "sysdefault:CARD=PCH", "plughw:CARD=PCH,DEV=0", "hw:CARD=PCH,DEV=0"]);
+    }
+
+    #[test]
+    fn alsa_rings_hold_four_periods_and_never_starve() {
+        // cpal takes a fixed ALSA size as the whole ring: the default 512 was ~10 ms of slack
+        assert_eq!(device_buffer_frames("ALSA", 512), 2048);
+        assert_eq!(device_buffer_frames("ALSA", 2048), 8192);
+        assert_eq!(device_buffer_frames("ALSA", 64), ALSA_MIN_RING);
+        assert_eq!(device_buffer_frames("ALSA", u32::MAX), ALSA_MAX_RING);
+        // other hosts take the setting as the callback size
+        assert_eq!(device_buffer_frames("CoreAudio", 512), 512);
+        assert_eq!(device_buffer_frames("WASAPI", 0), 1);
+    }
+
+    #[test]
+    fn the_clock_is_what_is_heard_not_what_is_queued() {
+        let ms = Duration::from_millis;
+        let a = Audible::default();
+        assert_eq!(a.frames(4800, 48_000, ms(5)), 0, "nothing is heard before the first callback");
+        // 4800 frames handed over when the device asked for more; 50 ms of them were still queued
+        a.on_callback(4800, ms(50), 48_000, ms(100));
+        assert_eq!(a.frames(5280, 48_000, ms(100)), 2400);
+        // between callbacks the clock runs on the wall clock
+        assert_eq!(a.frames(5280, 48_000, ms(110)), 2880);
+        // but never past what the device was given: a stalled device stops it
+        assert_eq!(a.frames(5280, 48_000, ms(9_000)), 5280);
+        assert_eq!(a.frames(5280, 48_000, ms(9_500)), 5280);
+        // a later, longer latency estimate never moves it backwards
+        a.on_callback(5280, ms(100), 48_000, ms(9_600));
+        assert_eq!(a.frames(5760, 48_000, ms(9_600)), 5280);
+    }
+
+    #[test]
+    fn a_broken_latency_report_cannot_stall_or_overflow_the_clock() {
+        let ms = Duration::from_millis;
+        let a = Audible::default();
+        a.on_callback(u64::MAX, Duration::MAX, u32::MAX, Duration::MAX);
+        assert_eq!(a.frames(1000, u32::MAX, Duration::MAX), 1000);
+        let b = Audible::default();
+        // an absurd latency is capped (2 s), so the clock still moves once that much has played
+        b.on_callback(48_000 * 3, Duration::from_secs(3600), 48_000, ms(0));
+        assert_eq!(b.frames(48_000 * 3, 48_000, ms(0)), 48_000);
     }
 
     #[test]

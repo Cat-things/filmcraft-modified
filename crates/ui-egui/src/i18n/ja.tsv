@@ -20,8 +20,8 @@
 	Add Audio Submix Track	オーディオサブミックストラックを追加
 	Add Caption at Playhead	再生ヘッドの位置にキャプションを追加
 	Add Chapter Marker…	チャプターマーカーを追加…
-	Add Edit	編集点を追加
-	Add Edit to All Tracks	すべてのトラックに編集点を追加
+	Cut/Split	カット/分割
+	Cut/Split All Tracks	すべてのトラックをカット/分割
 	Add Flash Cue Marker…	フラッシュキューマーカーを追加…
 	Add Frame Hold	フレームホールドを追加
 	Add Guide…	ガイドを追加…
@@ -2862,7 +2862,11 @@
 	Assign {key} to {command}	{key} を「{command}」に割り当て
 	Conflict: {key} is assigned to {commands} ({ctx})	競合: {key} は「{commands}」に割り当てられています ({ctx})
 	 and 	 と 
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	コマンドの「ショートカット」セルをクリックしてキーを押すと割り当てられます。+ で別のショートカットを追加できます。
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	ショートカットをクリックすると変更、セルの空いた部分または + をクリックすると追加できます。コマンドをキーにドラッグしても割り当てられます。
+	 (also on {list}; {command} runs first)	 ({list} にも割り当て済み。{command} が優先されます)
+	Use for {command} only	{command} のみに使用
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	コマンドをキーにドロップして割り当てます。組み合わせにするには修飾キーを押すか選択してください。
+	Click to change this shortcut	クリックしてこのショートカットを変更
 	Cleared {n} shortcut(s) of {command}	「{command}」のショートカットを {n} 個クリアしました
 	No export preset named `{name}`	「{name}」という名前の書き出しプリセットはありません
 	Open a sequence to export	書き出すシーケンスを開いてください
@@ -3609,3 +3613,4 @@
 	Shows the version, community links and credits in a FilmCraft window.	バージョン、コミュニティへのリンク、クレジットを FilmCraft のウィンドウに表示します。
 	Couldn't open your web browser	ウェブブラウザーを開けませんでした
 	Open this address in your browser yourself:	このアドレスをご自身でブラウザーで開いてください：
+	Undock Panels into Separate Windows	パネルを別ウィンドウにドッキング解除

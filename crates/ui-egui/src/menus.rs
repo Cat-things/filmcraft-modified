@@ -26,6 +26,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.dockPanel", "Dock Panel", [], None),
     uic!("window.floatPanel", "Undock Panel", [], None),
     uic!("window.closePanel", "Close Panel", [], None),
+    uic!("window.undockToWindows", "Undock Panels into Separate Windows", ["Window"], None),
     uic!("app.language.english", "English", ["Edit", "Language"], None),
     uic!("app.language.japanese", "日本語", ["Edit", "Language"], None),
     uic!("app.language.spanish", "Español", ["Edit", "Language"], None),
@@ -100,8 +101,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("multicam.toggleView", "Multi-Camera View", ["View"], Some("Shift+0")),
     uic!("multicam.recordToggle", "Multi-Camera Record On/Off Toggle", [], Some("0")),
     uic!("multicam.editCamerasDialog", "Edit Cameras…", [], None),
-    uic!("voiceover.recordToggle", "Voice-over Record", [], None),
-    uic!("voiceover.settingsDialog", "Voice-Over Record Settings…", [], None),
+    uic!("voiceover.recordToggle", "Voice-over Record", ["Sequence"], None),
+    uic!("voiceover.settingsDialog", "Voice-Over Record Settings…", ["Sequence"], None),
     // ids follow `ThemeKind`, labels follow Settings ▸ Appearance ▸ Color Theme (`darkest`, `dark`, `light`)
     uic!("view.theme.dark", "Darkest", ["View", "Appearance"], None),
     uic!("view.theme.medium", "Dark", ["View", "Appearance"], None),
@@ -697,6 +698,7 @@ pub fn menu_items(app: &FilmcraftApp) -> Vec<MenuItem> {
             "app.language.indonesian" => it.checked = Some(app.ui.language == crate::i18n::Language::Id),
             "app.language.italian" => it.checked = Some(app.ui.language == crate::i18n::Language::It),
             "app.language.korean" => it.checked = Some(app.ui.language == crate::i18n::Language::Ko),
+            "window.undockToWindows" => it.checked = Some(!app.workspaces.float_in_window),
             _ => {}
         }
         if it.id.starts_with("view.") {
@@ -744,6 +746,9 @@ pub fn default_menu_items() -> Vec<MenuItem> {
 /// Menu entries with their live shortcuts and enablement.
 pub fn menu_items_for(session: &filmcraft_engine::Session) -> Vec<MenuItem> {
     let mut out = Vec::new();
+    // built every frame the menus are shown: one pass over the bindings, not one per item
+    let primaries = session.shortcuts.primaries();
+    let shortcut = |id: &str| primaries.get(id).map(|k| k.to_string());
     for c in filmcraft_engine::command_specs() {
         if c.menu.is_empty() {
             continue;
@@ -757,8 +762,9 @@ pub fn menu_items_for(session: &filmcraft_engine::Session) -> Vec<MenuItem> {
             id: c.id.into(),
             label,
             path: c.menu.iter().map(|s| s.to_string()).collect(),
-            shortcut: session.shortcuts.primary(c.id),
-            enabled: session.is_enabled(c.id),
+            shortcut: shortcut(c.id),
+            // the spec in hand: `Session::is_enabled` would look it up again
+            enabled: (c.enabled)(session).is_ok(),
             checked: None,
         });
     }
@@ -770,20 +776,14 @@ pub fn menu_items_for(session: &filmcraft_engine::Session) -> Vec<MenuItem> {
             id: c.id.into(),
             label: c.label.into(),
             path: c.menu.iter().map(|s| s.to_string()).collect(),
-            shortcut: session.shortcuts.primary(c.id),
+            shortcut: shortcut(c.id),
             enabled: true,
             checked: None,
         });
     }
     for p in PanelKind::ALL {
-        out.push(MenuItem {
-            id: panel_command_id(p),
-            label: p.title().into(),
-            path: vec!["Window".into()],
-            shortcut: session.shortcuts.primary(&panel_command_id(p)),
-            enabled: true,
-            checked: None,
-        });
+        let id = panel_command_id(p);
+        out.push(MenuItem { shortcut: shortcut(&id), id, label: p.title().into(), path: vec!["Window".into()], enabled: true, checked: None });
     }
     out
 }
@@ -882,7 +882,9 @@ pub fn external_commands() -> Vec<filmcraft_engine::shortcuts::CommandInfo> {
 /// Draw the in-window menu bar.
 pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("interface-language"), app.ui.language));
-    let items = menu_items(app);
+    // The menu tree (every command, its shortcut and enablement) is only needed while a menu is
+    // open: built then, once per frame, instead of every frame the bar is drawn.
+    let mut items: Option<Vec<MenuItem>> = None;
     // Draw Edit ▸ Label with the user's live palette, not the baked-in label colours.
     let labels = app.session.prefs.labels.clone();
     let ctx = ui.ctx().clone();
@@ -890,8 +892,9 @@ pub fn menu_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     egui::MenuBar::new().config(egui::containers::menu::MenuConfig::new().style(crate::theme::menu_style)).ui(ui, |ui| {
         let mut titles = Vec::with_capacity(MENUS.len());
         for top in MENUS {
-            let mine: Vec<&MenuItem> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top)).collect();
             let r = ui.menu_button(app.ui.language.tr(top), |ui| {
+                let items = items.get_or_insert_with(|| menu_items(app));
+                let mine: Vec<&MenuItem> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some(top)).collect();
                 ui.set_min_width(260.0);
                 if mine.is_empty() {
                     ui.add_enabled(false, egui::Button::new(tl!("(empty)")));

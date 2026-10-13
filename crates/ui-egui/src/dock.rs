@@ -189,6 +189,10 @@ pub const WORKSPACES_FILE: &str = "workspaces.json";
 pub struct WorkspacePrefs {
     pub saved: Vec<SavedWorkspace>,
     pub current: String,
+    /// Undocked panels float inside the main window instead of opening windows of their own
+    /// (Window ▸ Undock Panels into Separate Windows, off).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub float_in_window: bool,
 }
 
 /// A named layout. `layout` is a [`DockNode`] kept as JSON, so one unreadable entry (a panel a
@@ -411,6 +415,40 @@ impl DockNode {
             DockNode::Tabs { panels, active } => panels.get(*active) == Some(&p),
         }
     }
+    /// Where `p` lives in this (workspace) tree, relative to the panels `docked` says are docked
+    /// now: a tab before the next of its group still docked, else split off the subtree it was
+    /// split from, on the side it was on, at that split's size (Program right of Source in
+    /// Editing). Bounded by the tree depth (workspace trees are validated before use).
+    pub fn home(&self, p: PanelKind, docked: &dyn Fn(PanelKind) -> bool) -> Option<Home> {
+        use craft_ui::docking::{Placement, Zone};
+        match self {
+            DockNode::Tabs { panels, .. } if panels.contains(&p) => {
+                let before = panels.iter().copied().skip_while(|q| *q != p).find(|q| *q != p && docked(*q));
+                let (anchor, before) = match before {
+                    Some(next) => (next, Some(next)),
+                    None => (panels.iter().copied().find(|q| *q != p && docked(*q))?, None),
+                };
+                Some(Home { anchor, placement: Placement::Tab { before }, sibling: Vec::new(), size: None })
+            }
+            DockNode::Tabs { .. } => None,
+            DockNode::Split { vertical, size, a, b } => {
+                let (ours, other, zone) = if a.contains(p) {
+                    (a, b, if *vertical { Zone::Top } else { Zone::Left })
+                } else if b.contains(p) {
+                    (b, a, if *vertical { Zone::Bottom } else { Zone::Right })
+                } else {
+                    return None;
+                };
+                ours.home(p, docked).or_else(|| {
+                    let mut sibling = Vec::new();
+                    other.panels(&mut sibling);
+                    sibling.retain(|q| *q != p && docked(*q));
+                    let anchor = *sibling.first()?;
+                    Some(Home { anchor, placement: Placement::Split(zone), sibling, size: Some(size.shared()) })
+                })
+            }
+        }
+    }
     /// Close a panel (remove its tab; empty groups collapse their split).
     pub fn close(&mut self, p: PanelKind) {
         crate::dock_shared::apply_tree(self, craft_ui::docking::Action::Close { panel: p });
@@ -447,6 +485,16 @@ impl DockNode {
         });
         crate::dock_shared::apply_tree(self, craft_ui::docking::Action::Open { panel: p, anchor });
     }
+}
+
+/// Where an undocked panel goes back to ([`DockNode::home`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Home {
+    pub anchor: PanelKind,
+    pub placement: craft_ui::docking::Placement<PanelKind>,
+    /// For a split: the docked panels of the subtree the panel was split from, and that split's size.
+    pub sibling: Vec<PanelKind>,
+    pub size: Option<SharedSplitSize>,
 }
 
 /// A floating group retains the same panel identities as docked tabs.

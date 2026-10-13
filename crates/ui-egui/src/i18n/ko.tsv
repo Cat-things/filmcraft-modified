@@ -94,8 +94,8 @@
 	Add caption at playhead	재생 헤드에 자막 추가
 	Add captions	자막 추가
 	Add Chapter Marker…	챕터 마커 추가…
-	Add Edit	편집점 추가
-	Add Edit to All Tracks	모든 트랙에 편집점 추가
+	Cut/Split	자르기/분할
+	Cut/Split All Tracks	모든 트랙 자르기/분할
 	Add Flash Cue Marker…	플래시 큐 마커 추가…
 	Add Frame Hold	프레임 고정 추가
 	Add Guide	안내선 추가
@@ -573,7 +573,11 @@
 	Clear Selected Marker	선택한 마커 지우기
 	Clear Transition	전환 지우기
 	Cleared {n} shortcut(s) of {command}	{command}의 단축키 {n}개 지움
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	명령의 단축키 셀을 클릭하고 키를 눌러 할당합니다. +는 단축키를 추가합니다.
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	단축키를 클릭하면 변경하고, 셀의 빈 부분이나 +를 클릭하면 추가합니다. 명령을 키로 드래그해도 됩니다.
+	 (also on {list}; {command} runs first)	 ({list}에도 할당됨, {command}이(가) 우선)
+	Use for {command} only	{command}에만 사용
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	명령을 키에 놓아 할당합니다. 조합하려면 보조 키를 누르거나 선택하세요.
+	Click to change this shortcut	클릭하여 이 단축키 변경
 	Click a key on the keyboard to see its shortcuts	키보드에서 키를 클릭하면 단축키 표시
 	Click in the Program monitor to place mask points (drag for curves); click the first point or press Enter to close	프로그램 모니터를 클릭해 마스크 점 배치(드래그 시 곡선), 첫 점 클릭 또는 Enter로 닫기
 	Click to select all clips to the left in all tracks. Shift-click for a single track.	클릭하면 모든 트랙에서 왼쪽 클립 모두 선택. Shift-클릭은 단일 트랙.
@@ -3596,3 +3600,4 @@
 	Shows the version, community links and credits in a FilmCraft window.	FilmCraft 창에 버전, 커뮤니티 링크, 제작진을 보여 줍니다.
 	Couldn't open your web browser	웹 브라우저를 열 수 없습니다
 	Open this address in your browser yourself:	이 주소를 브라우저에서 직접 여세요:
+	Undock Panels into Separate Windows	패널을 별도 창으로 도킹 해제

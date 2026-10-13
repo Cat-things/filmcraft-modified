@@ -308,3 +308,97 @@ fn default_keymaps_have_no_conflicts_on_any_platform() {
         assert!(mac.iter().any(|b| b.command == cmd && b.keys == keys), "{cmd} {keys} on macOS");
     }
 }
+
+/// Keys of `command` as (keys, panel), in binding order.
+fn keys_of(s: &Session, command: &str) -> Vec<(String, Option<String>)> {
+    s.shortcuts.for_command(command).iter().map(|b| (b.keys.clone(), b.panel.clone())).collect()
+}
+
+#[test]
+fn replacing_one_shortcut_keeps_the_command_s_other_keys() {
+    // Editing one shortcut of several used to replace them all, and every panel copy with them.
+    let mut s = Session::default();
+    s.execute("shortcuts.set", json!({"command": "edit.undo", "keys": "Cmd+Alt+Z", "add": true})).unwrap();
+    s.execute("shortcuts.set", json!({"command": "edit.undo", "keys": "Cmd+Shift+U", "replace": "Cmd+Z"})).unwrap();
+    let keys = keys_of(&s, "edit.undo");
+    assert!(keys.contains(&("Cmd+Alt+Z".into(), None)), "{keys:?}");
+    assert!(keys.contains(&("Left".into(), Some("History".into()))), "its own panel key stays: {keys:?}");
+    assert!(!keys.iter().any(|(k, _)| k == "Cmd+Z"), "{keys:?}");
+    assert_eq!(s.shortcuts.primary("edit.undo").as_deref(), Some("Cmd+Shift+U"), "the edited key keeps its place (menus show it)");
+    // an application key's panel copies follow it (#1333)
+    s.execute("shortcuts.set", json!({"command": "file.newBin", "keys": "Cmd+Alt+B", "replace": "Cmd+B"})).unwrap();
+    assert_eq!(keys_of(&s, "file.newBin"), [("Cmd+Alt+B".to_string(), None)]);
+    // a panel key is replaced in its own panel only
+    s.execute("shortcuts.set", json!({"command": "edit.undo", "keys": "Up", "panel": "History", "replace": "Left"})).unwrap();
+    let keys = keys_of(&s, "edit.undo");
+    assert!(keys.contains(&("Up".into(), Some("History".into()))) && keys.contains(&("Cmd+Shift+U".into(), None)), "{keys:?}");
+}
+
+#[test]
+fn keeping_a_conflict_leaves_the_other_command_its_key_and_runs_the_new_one() {
+    let mut s = Session::default();
+    let baseline = s.shortcuts.conflicts(Platform::current());
+    let k = Chord::parse("Cmd+Shift+K").unwrap();
+    let r = s.execute("shortcuts.set", json!({"command": "edit.undo", "keys": "Cmd+Shift+K", "add": true, "keepConflicts": true})).unwrap();
+    assert_eq!(r["reassigned"], json!([]), "{r}");
+    assert_eq!(r["shadowed"][0]["command"], json!("sequence.addEditAllTracks"), "{r}");
+    assert_eq!(s.shortcuts.primary("sequence.addEditAllTracks").as_deref(), Some("Cmd+Shift+K"), "nothing is taken away");
+    assert_eq!(s.shortcuts.primary("edit.undo").as_deref(), Some("Cmd+Z"), "added, not replaced");
+    assert_eq!(s.shortcuts.resolve(&k, None, Platform::current()).unwrap().command, "edit.undo", "the key runs the command just assigned");
+    let c = s.shortcuts.conflicts(Platform::current());
+    let ours = c.iter().find(|(ctx, keys, _)| ctx == "Application" && keys == "Cmd+Shift+K").expect("listed as a conflict");
+    assert_eq!(ours.2.first().map(String::as_str), Some("edit.undo"), "the first command of a conflict is the one that runs");
+    // resolve it in favour of the new command
+    let r = s.execute("shortcuts.keepOnly", json!({"command": "edit.undo", "keys": "Cmd+Shift+K"})).unwrap();
+    assert_eq!(r["removed"][0]["command"], json!("sequence.addEditAllTracks"), "{r}");
+    assert!(s.shortcuts.primary("sequence.addEditAllTracks").is_none());
+    assert_eq!(s.shortcuts.conflicts(Platform::current()), baseline);
+    s.execute("shortcuts.undo", json!({})).unwrap();
+    assert_eq!(s.shortcuts.primary("sequence.addEditAllTracks").as_deref(), Some("Cmd+Shift+K"));
+}
+
+#[test]
+fn the_winner_of_a_kept_conflict_survives_a_restart() {
+    let dir = temp_dir("kept-conflict");
+    let mut s = Session::default();
+    s.shortcuts.set_dir(&dir);
+    s.execute("shortcuts.set", json!({"command": "sequence.addEdit", "keys": "C", "add": true, "keepConflicts": true})).unwrap();
+    let c = Chord::parse("C").unwrap();
+    let mut t = Shortcuts::new();
+    t.set_dir(&dir);
+    for sc in [&s.shortcuts, &t] {
+        assert_eq!(sc.resolve(&c, None, Platform::current()).map(|b| b.command.as_str()), Some("sequence.addEdit"));
+        assert!(sc.for_command("sequence.addEdit").iter().any(|b| b.keys == "Cmd+K" && b.panel.is_none()), "added, not replaced");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hostile_replace_and_keep_only_parameters_change_nothing() {
+    let mut s = Session::default();
+    let before = s.shortcuts.bindings.clone();
+    for p in [
+        json!({"command": "edit.undo", "keys": "Cmd+J", "replace": "Cmd+Shift+Q"}),
+        json!({"command": "edit.undo", "keys": "Cmd+J", "replace": "Cmd+Z", "add": true}),
+        json!({"command": "edit.undo", "keys": "Cmd+J", "replace": 7}),
+        json!({"command": "edit.undo", "keys": "Cmd+J", "replace": "Cmd+Nope"}),
+        json!({"command": "edit.undo", "keys": "Cmd+J", "replace": "Left"}),
+    ] {
+        assert!(s.execute("shortcuts.set", p.clone()).is_err(), "{p}");
+    }
+    for p in [
+        json!({"command": "edit.undo", "keys": "Cmd+J"}),
+        json!({"command": "edit.undo", "keys": "Cmd+Z", "panel": "Nowhere"}),
+        json!({"command": "edit.undo"}),
+        json!({"keys": "Cmd+Z"}),
+        json!({"command": "edit.undo", "keys": ""}),
+    ] {
+        assert!(s.execute("shortcuts.keepOnly", p.clone()).is_err(), "{p}");
+    }
+    assert_eq!(s.shortcuts.bindings, before);
+    assert!(!s.shortcuts.modified);
+    // keeping a key nobody else has is fine and changes nothing
+    let r = s.execute("shortcuts.keepOnly", json!({"command": "edit.undo", "keys": "Cmd+Z"})).unwrap();
+    assert_eq!(r["removed"], json!([]));
+    assert_eq!(s.shortcuts.bindings, before);
+}

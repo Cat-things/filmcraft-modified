@@ -22,8 +22,8 @@
 	Add Audio Submix Track	Adicionar faixa de submixagem de áudio
 	Add Caption at Playhead	Adicionar legenda no cursor de reprodução
 	Add Chapter Marker…	Adicionar marcador de capítulo…
-	Add Edit	Adicionar edição
-	Add Edit to All Tracks	Adicionar edição em todas as faixas
+	Cut/Split	Cortar/Dividir
+	Cut/Split All Tracks	Cortar/Dividir todas as faixas
 	Add Flash Cue Marker…	Adicionar marcador de referência Flash…
 	Add Frame Hold	Adicionar quadro congelado
 	Add Guide…	Adicionar guia…
@@ -2875,7 +2875,11 @@
 	Assign {key} to {command}	Atribuir {key} a {command}
 	Conflict: {key} is assigned to {commands} ({ctx})	Conflito: {key} está atribuída a {commands} ({ctx})
 	 and 	 e 
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	Clique na célula Atalho de um comando e pressione as teclas para atribuí-lo; + adiciona outro atalho.
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	Clique em um atalho para alterá-lo, na parte vazia da célula ou em + para adicionar um, ou arraste um comando para uma tecla.
+	 (also on {list}; {command} runs first)	 (também em {list}; {command} tem prioridade)
+	Use for {command} only	Usar só para {command}
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	Solte o comando em uma tecla para atribuí-lo; segure ou selecione modificadores para uma combinação.
+	Click to change this shortcut	Clique para alterar este atalho
 	Cleared {n} shortcut(s) of {command}	{n} atalho(s) de {command} removido(s)
 	No export preset named `{name}`	Nenhuma predefinição de exportação chamada `{name}`
 	Open a sequence to export	Abra uma sequência para exportar
@@ -3578,3 +3582,5 @@
 
 # The native macOS application menu (Settings…).
 	Settings	Preferências
+	Undock Panels into Separate Windows	Desacoplar painéis em janelas separadas
+	Dock Panel	Acoplar painel

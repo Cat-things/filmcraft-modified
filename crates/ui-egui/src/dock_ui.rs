@@ -1,6 +1,6 @@
 //! FilmCraft's panel chrome and document tabs over the shared docking transactions.
 
-use craft_ui::docking::{Action, DropTarget, Placement, Zone, resolve_drop};
+use craft_ui::docking::{Action, DropTarget, Location, Placement, Zone, resolve_drop};
 use egui::{Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -30,6 +30,17 @@ pub(crate) fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, param
             Ok(Value::Null)
         })());
     }
+    if id == "window.undockToWindows" {
+        return Some((|| {
+            let mut prefs = app.workspaces.clone();
+            prefs.float_in_window = match params.get("on") {
+                None => !prefs.float_in_window,
+                Some(value) => !value.as_bool().ok_or("on must be true or false")?,
+            };
+            app.set_workspaces(prefs)?;
+            Ok(json!({"separateWindows": !app.workspaces.float_in_window}))
+        })());
+    }
     if !matches!(id, "window.dockPanel" | "window.floatPanel" | "window.closePanel") {
         return None;
     }
@@ -46,6 +57,11 @@ pub(crate) fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, param
                     Some(value) => serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?,
                 };
                 Action::Float { panel, rect }
+            }
+            // no zone, anchor or tab position: put an undocked panel back where Window ▸ opens it
+            _ if ["zone", "anchor", "before"].iter().all(|key| params.get(key).is_none()) => {
+                app.redock(panel)?;
+                return Ok(json!({"panel": panel.id()}));
             }
             _ => {
                 let zone_name = match params.get("zone") {
@@ -80,6 +96,11 @@ pub(crate) fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, param
     })())
 }
 
+/// The native window of the undocked group whose first panel is `owner`.
+fn window_id(owner: PanelKind) -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(("floating-window", owner.id()))
+}
+
 pub(crate) fn default_float_rect(screen: Rect) -> [f32; 4] {
     let center = screen.center();
     [center.x - 210.0, center.y - 160.0, 420.0, 320.0]
@@ -110,6 +131,52 @@ impl FilmcraftApp {
             self.ui.keys.maximized = None;
         }
         Ok(())
+    }
+
+    /// Put an undocked panel back into the docked layout: where the workspace keeps it (its tab
+    /// group, else its side of the split it came from), else where Window ▸ <panel> opens it.
+    pub fn redock(&mut self, panel: PanelKind) -> Result<(), String> {
+        if !self.ui.floating.iter().any(|group| group.panels.contains(&panel)) {
+            return Ok(());
+        }
+        let dock = self.ui.dock.clone();
+        let docked = |p: PanelKind| dock.contains(p);
+        let name = self.ui.workspace.clone();
+        let home = dock::saved_layout(&self.workspaces, &name)
+            .home(panel, &docked)
+            .or_else(|| dock::is_builtin(&name).then(|| dock::workspace(&name).home(panel, &docked)).flatten());
+        if let Some(home) = home {
+            // the exact place: split off the whole sibling subtree again, at the split's size
+            let restored = self.commit_dock(|shared| {
+                let mut proposed = shared.clone();
+                proposed.apply(Action::Close { panel }).map_err(|error| error.to_string())?;
+                let location = Location {
+                    floating: None,
+                    anchor: Some(home.anchor),
+                    placement: home.placement.clone(),
+                    size: home.size,
+                    stack: None,
+                    sibling: home.sibling.clone(),
+                };
+                proposed.restore(panel, &location).map_err(|error| error.to_string())?;
+                *shared = proposed;
+                Ok(())
+            });
+            // the layout changed since: beside the same panel
+            if restored.is_ok() || self.apply_dock(Action::Move { panel, anchor: home.anchor, placement: home.placement }).is_ok() {
+                self.ui.keys.maximized = None;
+                self.ui.focused = panel;
+                return Ok(());
+            }
+        }
+        self.apply_dock(Action::Close { panel })?;
+        self.show_panel(panel);
+        Ok(())
+    }
+
+    /// Whether undocked panels get native windows of their own this frame.
+    pub(crate) fn separate_windows(&self, ctx: &egui::Context) -> bool {
+        self.hooks.separate_windows && !self.workspaces.float_in_window && !ctx.embed_viewports()
     }
 
     /// Dock a panel along an edge of the whole workspace rather than beside one group.
@@ -149,6 +216,9 @@ impl FilmcraftApp {
         {
             return panel == PanelKind::Timeline;
         }
+        if self.separate_windows(ctx) {
+            return true;
+        }
         for index in self.floating_order(ctx).into_iter().rev() {
             if let Some(group) = self.ui.floating.get(index)
                 && floating_rect(group, ctx.content_rect()).contains(pos)
@@ -179,10 +249,15 @@ impl FilmcraftApp {
     pub(crate) fn dock_area(&mut self, ui: &mut egui::Ui, body: Rect) {
         let t = self.tokens;
         let ctx = ui.ctx().clone();
+        let windows = self.separate_windows(&ctx);
         if let Some(panel) = self.pending_panel_raise.take()
             && let Some(owner) = self.ui.floating.iter().find(|group| group.panels.contains(&panel)).and_then(|group| group.panels.first())
         {
-            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(("floating-panel", owner.id()))));
+            if windows {
+                ctx.send_viewport_cmd_to(window_id(*owner), egui::ViewportCommand::Focus);
+            } else {
+                ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new(("floating-panel", owner.id()))));
+            }
         }
         let maximized =
             self.ui.keys.maximized.filter(|panel| self.ui.dock.contains(*panel) || self.ui.floating.iter().any(|group| group.panels.contains(panel)));
@@ -230,11 +305,24 @@ impl FilmcraftApp {
             dock::paint_group_focus(ui, group, self.ui.focused, &t);
         }
         let floating_order = self.floating_order(&ctx);
-        for index in floating_order.into_iter().filter(|_| maximized.is_none()) {
-            if let Some(target) = self.floating_group(&ctx, index, &seqs, &mut actions) {
+        let mut shown_windows = Vec::new();
+        // a native window stays open while a frame of the main window is maximized (unless it
+        // holds the maximized panel, which the main window shows)
+        let shown: Vec<usize> = floating_order
+            .into_iter()
+            .filter(|index| match maximized {
+                None => true,
+                Some(panel) => windows && self.ui.floating.get(*index).is_some_and(|group| !group.panels.contains(&panel)),
+            })
+            .collect();
+        for index in shown {
+            if windows {
+                shown_windows.extend(self.floating_window(&ctx, index, &seqs, &mut actions));
+            } else if let Some(target) = self.floating_group(&ctx, index, &seqs, &mut actions) {
                 targets.push(target);
             }
         }
+        self.open_windows = shown_windows;
         for action in layout_actions {
             let _ = self.dock_command(&ctx, action);
         }
@@ -270,9 +358,11 @@ impl FilmcraftApp {
                 }
                 DockAction::PanelMenu(panel, pos) => {
                     let frame = ctx.cumulative_frame_nr();
+                    let viewport = ctx.viewport_id();
                     ctx.data_mut(|data| {
                         data.insert_temp(egui::Id::new("panel-menu"), (panel, pos));
                         data.insert_temp(egui::Id::new("panel-menu-opened"), frame);
+                        data.insert_temp(egui::Id::new("panel-menu-viewport"), viewport);
                     });
                 }
             }
@@ -280,6 +370,96 @@ impl FilmcraftApp {
         self.panel_drag(&ctx, body, &targets);
         panels::panel_menu_popup(self, ui);
         self.cancel_value_drag(ui.ctx());
+    }
+
+    /// An undocked group in a native window of its own (another screen, say). The window opens
+    /// where the group floated, at its size; after that the operating system places it, and its
+    /// position and size are kept for the workspace. Closing the window docks its panels again.
+    /// Keys pressed in it run shortcuts as in the main window.
+    fn floating_window(&mut self, ctx: &egui::Context, index: usize, seqs: &dock::SeqTabs, actions: &mut Vec<DockAction>) -> Option<egui::ViewportId> {
+        let floating = self.ui.floating.get(index)?.clone();
+        let owner = *floating.panels.first()?;
+        let active = floating.panels.get(floating.active).copied().unwrap_or(owner);
+        let id = window_id(owner);
+        let title = format!("{} — FilmCraft", crate::i18n::t(active.title()));
+        let mut builder = egui::ViewportBuilder::default().with_title(title).with_min_inner_size([240.0, 160.0]);
+        if !self.open_windows.contains(&id) {
+            // first frame: open over the spot the group floated at (the main window's coordinates)
+            let size = vec2(floating.rect[2].max(240.0), floating.rect[3].max(160.0));
+            builder = builder.with_inner_size(size);
+            if let Some(main) = ctx.input(|i| i.viewport().inner_rect) {
+                builder = builder.with_position(main.min + vec2(floating.rect[0], floating.rect[1]));
+            }
+        }
+        let main = ctx.input(|i| i.viewport().inner_rect);
+        let t = self.tokens;
+        let mut closed = false;
+        let mut moved = None;
+        ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            let wctx = ui.ctx().clone();
+            closed = wctx.input(|i| i.viewport().close_requested());
+            let rect = wctx.content_rect();
+            ui.painter().rect_filled(rect, 0.0, t.app_bg);
+            let compact = floating.panels.len() == 1 && owner.compact();
+            let header = if compact { 8.0 } else { t.tab_h };
+            let body = rect.shrink(t.gap.max(2.0));
+            let group = Group {
+                path: format!("w{index}"),
+                rect: body,
+                content: Rect::from_min_max(pos2(body.min.x, body.min.y + header), body.max),
+                panels: floating.panels.clone(),
+                active: floating.active,
+            };
+            let chrome = dock::draw_group_chrome_details(ui, &group, seqs, &t, &mut self.auto);
+            for action in chrome.actions {
+                match action {
+                    // the panel menu opens in this window, at the pointer
+                    DockAction::PanelMenu(panel, pos) => {
+                        let frame = wctx.cumulative_frame_nr();
+                        let viewport = wctx.viewport_id();
+                        wctx.data_mut(|data| {
+                            data.insert_temp(egui::Id::new("panel-menu"), (panel, pos));
+                            data.insert_temp(egui::Id::new("panel-menu-opened"), frame);
+                            data.insert_temp(egui::Id::new("panel-menu-viewport"), viewport);
+                        });
+                    }
+                    // a tab can't be dragged out of a native window into another one
+                    DockAction::BeginDrag(_) => {}
+                    other => actions.push(other),
+                }
+            }
+            if let Some(panel) = group.panels.get(group.active).copied() {
+                self.panel_body(ui, panel, group.content);
+            }
+            dock::paint_group_focus(ui, &group, self.ui.focused, &t);
+            panels::panel_menu(self, ui);
+            // keys typed in this window
+            self.handle_shortcuts(&wctx);
+            // where the user put the window, in the main window's coordinates
+            let inner = wctx.input(|i| i.viewport().inner_rect);
+            if let Some(inner) = inner {
+                let at = match main {
+                    Some(main) => inner.min - main.min.to_vec2(),
+                    None => pos2(floating.rect[0], floating.rect[1]),
+                };
+                let next = [at.x, at.y, inner.width(), inner.height()];
+                if next.iter().all(|v| v.is_finite()) && next != floating.rect {
+                    moved = Some(next);
+                }
+            }
+        });
+        if closed {
+            for panel in floating.panels.iter().copied() {
+                if let Err(error) = self.redock(panel) {
+                    self.ui.status = error;
+                }
+            }
+            return None;
+        }
+        if let Some(rect) = moved {
+            let _ = self.dock_command(ctx, Action::MoveFloating { panel: owner, rect });
+        }
+        Some(id)
     }
 
     fn floating_group(&mut self, ctx: &egui::Context, index: usize, seqs: &dock::SeqTabs, actions: &mut Vec<DockAction>) -> Option<DropTarget<PanelKind>> {

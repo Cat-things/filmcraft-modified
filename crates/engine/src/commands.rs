@@ -51,8 +51,20 @@ pub fn command_specs() -> &'static [CommandSpec] {
     SPECS.get_or_init(build)
 }
 
+/// The command with id `id`. Every dispatch (menus, keys, the control channel) and every menu
+/// item's enablement asks, so this is a hash lookup, not a scan of the registry. A repeated id
+/// resolves to its first registration, as a scan would.
 pub fn find(id: &str) -> Option<&'static CommandSpec> {
-    command_specs().iter().find(|c| c.id == id)
+    static INDEX: OnceLock<std::collections::HashMap<&'static str, usize>> = OnceLock::new();
+    let specs = command_specs();
+    let index = INDEX.get_or_init(|| {
+        let mut index = std::collections::HashMap::with_capacity(specs.len());
+        for (i, c) in specs.iter().enumerate() {
+            index.entry(c.id).or_insert(i);
+        }
+        index
+    });
+    index.get(id).and_then(|i| specs.get(*i))
 }
 
 // ---------- enablement ----------
@@ -2051,7 +2063,7 @@ fn build() -> Vec<CommandSpec> {
             s.state.open_sequences.insert(to, tab);
             Ok(json!({"index": to}))
         }),
-        cmd!("sequence.addEdit", "Add Edit", ["Sequence"], Some("Cmd+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
+        cmd!("sequence.addEdit", "Cut/Split", ["Sequence"], Some("Cmd+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
             let t = time_p(s, p, "").unwrap_or(s.playhead());
             // Like Premiere: selected clips under the playhead are cut, and only they (#164);
             // with none, the targeted tracks are.
@@ -2059,16 +2071,16 @@ fn build() -> Vec<CommandSpec> {
             let selected_here =
                 s.active_sequence().is_some_and(|q| sel.iter().any(|c| q.find_item(*c).is_some_and(|(_, it)| it.start < t && t < it.start + it.duration)));
             let n = if selected_here {
-                s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor_items(q, &sel, t, ctx)))?
+                s.edit_sequence("Cut/Split", |q, ctx, _| Ok(edit::razor_items(q, &sel, t, ctx)))?
             } else {
                 let tg = s.targeting().targeted;
-                s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?
+                s.edit_sequence("Cut/Split", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?
             };
             Ok(json!({"cuts": n.len()}))
         }),
-        cmd!("sequence.addEditAllTracks", "Add Edit to All Tracks", ["Sequence"], Some("Cmd+Shift+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
+        cmd!("sequence.addEditAllTracks", "Cut/Split All Tracks", ["Sequence"], Some("Cmd+Shift+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
             let t = time_p(s, p, "").unwrap_or(s.playhead());
-            let n = s.edit_sequence("Add Edit to All Tracks", |q, ctx, _| {
+            let n = s.edit_sequence("Cut/Split All Tracks", |q, ctx, _| {
                 let mut n = edit::razor(q, &[], t, ctx);
                 n.extend(edit::captions::split_captions_at(q, &[], t, ctx));
                 Ok(n)

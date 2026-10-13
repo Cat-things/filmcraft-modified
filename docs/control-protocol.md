@@ -152,12 +152,19 @@ params the menu entries open dialogs (ids `colorDialog.space.<id>`, `colorDialog
 sequence as tone-mapped SDR.
 
 **Keyboard shortcuts** (`crates/engine/src/shortcuts.rs`): `shortcuts.list {query?, panel?}`,
-`shortcuts.get`, `shortcuts.set {command, keys, panel?, add?, keepConflicts?}`, `shortcuts.clear`,
+`shortcuts.get`, `shortcuts.set {command, keys, panel?, add?, replace?, keepConflicts?}` (`replace`
+swaps just that one of the command's shortcuts; `keepConflicts` leaves the key on the other commands
+that use it, the new binding running first, and returns them as `shadowed`),
+`shortcuts.keepOnly {command, keys, panel?}` (resolve a conflict: the other commands lose the key),
+`shortcuts.clear`,
 `shortcuts.undo` / `shortcuts.redo`, `shortcuts.conflicts {platform?}`, `shortcuts.forKey {key}`,
 `shortcuts.resolve {keys, panel?}`, `shortcuts.presets`, `shortcuts.loadPreset` / `savePreset` /
 `deletePreset {name}`, `shortcuts.export` / `import {path}`, `shortcuts.audit`. Keys use `Cmd` (⌘ /
 Ctrl), `Ctrl` (macOS ⌃), `Alt`, `Shift`. The dialog (Edit ▸ Keyboard Shortcuts…, ⌥⌘K) uses ids
-`shortcuts.*` (`shortcuts.key.K`, `shortcuts.cell.<command>`, `shortcuts.ok`, …).
+`shortcuts.*` (`shortcuts.key.K`, `shortcuts.chip.<command>.<i>`, `shortcuts.cell.<command>`,
+`shortcuts.conflict.keep.<i>`, `shortcuts.ok`, …); `ui.drag` from `shortcuts.row.<command>` to
+`shortcuts.key.<Key>` assigns the key, with the modifiers selected on the drawn keyboard. The
+dialog never takes a key away from another command: it assigns with `keepConflicts`.
 
 ## MCP
 `filmcraft-cli mcp` serves MCP on stdio: headless (in-process session; `--demo` / `--project p.fcproj`)
@@ -177,8 +184,9 @@ Time is in ticks (254 016 000 000 per second); commands also accept `seconds`, `
 | Command | Parameters | Result |
 | --- | --- | --- |
 | `window.floatPanel` | `{panel?, rect?: [x,y,width,height]}` | Move an existing panel into a floating group. Omitted panel uses the focused panel; omitted rect uses a centered 420×320 group. |
-| `window.dockPanel` | `{panel?, anchor?, zone?: "center"\|"left"\|"right"\|"top"\|"bottom", before?}` | Move into the anchor's tab group or a side split; `before` names an existing destination tab for precise ordering. Floating destinations accept tabs only. Without `anchor`, a side `zone` docks the panel along that edge of the whole workspace, at a quarter of its width or height. |
+| `window.dockPanel` | `{panel?, anchor?, zone?: "center"\|"left"\|"right"\|"top"\|"bottom", before?}` | Move into the anchor's tab group or a side split; `before` names an existing destination tab for precise ordering. Floating destinations accept tabs only. Without `anchor`, a side `zone` docks the panel along that edge of the whole workspace, at a quarter of its width or height. With none of `anchor`, `zone` and `before`, an undocked panel goes back where Window ▸ opens it (the panel menu's Dock Panel). |
 | `window.closePanel` | `{panel?}` | Close a docked or floating panel without closing its project documents. |
+| `window.undockToWindows` | `{on?: bool}` | Window ▸ Undock Panels into Separate Windows (default on; omitted `on` toggles). On, the desktop app shows each undocked group in a native window of its own, which can go to another screen; closing that window docks its panels again. Off (and in hosts without native windows, such as the web and the UI tests), undocked groups float inside the main window. Saved in `workspaces.json` (`floatInWindow`). |
 
 Invalid source/target identities and non-finite or out-of-range geometry return an error with
 the layout unchanged. `ui.inspect.ui.floating` reports floating groups and their logical-point
