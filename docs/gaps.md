@@ -278,7 +278,13 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Have:** a stream the device drops while playing (an ALSA xrun cpal reports as `POLLERR`, an
   unplugged device) is restarted with the same rate, channels, clock and mixer position, so sound
   resumes instead of playback going silent (at most 3 restarts in 10 s); a panicking mixer plays
-  silence (#840).
+  silence (#840). On ALSA (Linux) the I/O buffer size is the period and the ring holds four of
+  them, at least 2048 frames: cpal took the setting as the whole ring, so the default 512 left
+  ~10 ms of slack and stuttered or failed with xruns through PipeWire / PulseAudio, and a size the
+  device refuses falls back to the backend's default instead of no sound. The playback clock is
+  what is heard (frames handed over minus the device's reported output latency), so the picture no
+  longer runs ahead of the sound. Voice-over input falls back past a broken ALSA `default` like
+  output does, and a device that never opens fails the take after 10 s instead of freezing the UI.
 - **Estimate:** 20–40 h.
 
 ## G18. Effects depth: approximations and missing behaviour

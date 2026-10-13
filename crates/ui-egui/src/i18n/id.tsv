@@ -25,8 +25,8 @@
 	Add Audio Submix Track	Tambah Trek Submix Audio
 	Add Caption at Playhead	Tambah Takarir di Kepala Putar
 	Add Chapter Marker…	Tambah Penanda Bab…
-	Add Edit	Tambah Titik Edit
-	Add Edit to All Tracks	Tambah Titik Edit ke Semua Trek
+	Cut/Split	Potong/Pisah
+	Cut/Split All Tracks	Potong/Pisah Semua Trek
 	Add Flash Cue Marker…	Tambah Penanda Isyarat Flash…
 	Add Frame Hold	Tambah Tahan Bingkai
 	Add Guide…	Tambah Garis Bantu…
@@ -2878,7 +2878,11 @@
 	Assign {key} to {command}	Tetapkan {key} ke {command}
 	Conflict: {key} is assigned to {commands} ({ctx})	Konflik: {key} ditetapkan ke {commands} ({ctx})
 	 and 	 dan 
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	Klik sel Pintasan suatu perintah lalu tekan tombol untuk menetapkannya; + menambahkan pintasan lain.
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	Klik pintasan untuk mengubahnya, bagian kosong sel atau + untuk menambah, atau seret perintah ke sebuah tombol.
+	 (also on {list}; {command} runs first)	 (juga di {list}; {command} didahulukan)
+	Use for {command} only	Hanya untuk {command}
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	Lepaskan perintah di sebuah tombol untuk menetapkannya; tahan atau pilih pengubah untuk kombinasi.
+	Click to change this shortcut	Klik untuk mengubah pintasan ini
 	Cleared {n} shortcut(s) of {command}	{n} pintasan dari {command} dihapus
 	No export preset named `{name}`	Tidak ada preset ekspor bernama `{name}`
 	Open a sequence to export	Buka sekuens untuk mengekspor
@@ -3575,3 +3579,5 @@
 	Appearance Settings…	Pengaturan Tampilan…
 	Add to favorites	Tambahkan ke favorit
 	Remove from favorites	Hapus dari favorit
+	Undock Panels into Separate Windows	Lepas Panel ke Jendela Terpisah
+	Dock Panel	Tambatkan Panel

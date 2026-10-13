@@ -170,6 +170,10 @@ pub struct HostHooks {
     /// Files or an image on the system clipboard, for Paste in the Timeline and the Project panel
     /// (#611). Without it Paste only pastes clips copied in FilmCraft.
     pub clipboard_media: Option<Box<dyn FnMut() -> Option<ClipboardMedia>>>,
+    /// The windowing layer can open more native windows (egui viewports): undocked panels get a
+    /// window of their own, which can go to another screen, unless Window ▸ Undock Panels into
+    /// Separate Windows is off. Without it they float inside the main window.
+    pub separate_windows: bool,
 }
 
 /// What [`HostHooks::clipboard_media`] found on the system clipboard.
@@ -292,6 +296,8 @@ pub struct FilmcraftApp {
     control_rx: Option<Receiver<ControlRequest>>,
     /// One explicit panel reveal; consumed by the custom renderer, never repeated per frame.
     pub(crate) pending_panel_raise: Option<PanelKind>,
+    /// Native windows of undocked panels shown last frame (a new one opens where its group floated).
+    pub(crate) open_windows: Vec<egui::ViewportId>,
     /// Explicit automation mode: native widget input and native menu commands are excluded.
     pub(crate) control_input_only: bool,
     /// Backend focus before synthetic input changes egui's effective focus for this frame.
@@ -555,6 +561,7 @@ impl FilmcraftApp {
             textures: HashMap::new(),
             control_rx: None,
             pending_panel_raise: None,
+            open_windows: Vec::new(),
             control_input_only: false,
             native_window_focused: None,
             synthetic_modifiers: egui::Modifiers::NONE,

@@ -192,7 +192,8 @@ fn close_gap_can_be_found_assigned_and_run_from_the_shortcut_editor() {
     d.ok("ui.click", json!({"id":"shortcuts.cell.sequence.closeGap"}));
     d.frames(3);
     d.shot("close-gap-shortcut-recording");
-    assert_eq!(d.harness.state().shortcut_editor.recording, Some(("sequence.closeGap".into(), false)), "{:?}", d.harness.state().shortcut_editor);
+    let recording = Some(filmcraft_ui_egui::panels::shortcuts_dialog::Recording::add("sequence.closeGap"));
+    assert_eq!(d.harness.state().shortcut_editor.recording, recording, "{:?}", d.harness.state().shortcut_editor);
     d.ok("ui.key", json!({"key":"Alt+Shift+F8"}));
     d.frames(3);
     assert_eq!(d.harness.state().session.shortcuts.primary("sequence.closeGap").as_deref(), Some("Alt+Shift+F8"));

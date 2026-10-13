@@ -168,10 +168,10 @@ export CARGO_TARGET_DIR=target/agent-hevc     # separate build dir, no lock figh
 1. Add a `cmd!` (action) or `query!` (read-only) entry to `build()` in
    `crates/engine/src/commands.rs`:
    ```rust
-   cmd!("sequence.addEdit", "Add Edit", ["Sequence"], Some("Cmd+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
+   cmd!("sequence.addEdit", "Cut/Split", ["Sequence"], Some("Cmd+K"), r#"{"time":ticks?}"#, has_seq, |s, p| {
        let t = time_p(s, p, "").unwrap_or(s.playhead());
        let tg = s.targeting().targeted;
-       let n = s.edit_sequence("Add Edit", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?;
+       let n = s.edit_sequence("Cut/Split", |q, ctx, _| Ok(edit::razor(q, &tg, t, ctx)))?;
        Ok(json!({"cuts": n.len()}))
    }),
    ```

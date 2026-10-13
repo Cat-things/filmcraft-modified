@@ -391,6 +391,27 @@ impl Binding {
     }
 }
 
+/// What [`Shortcuts::assign`] does with the command's other shortcuts in the context it assigns in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Existing<'a> {
+    /// They all go: the new key becomes the command's only shortcut there.
+    ReplaceAll,
+    /// They stay: the new key is one more shortcut.
+    Keep,
+    /// Only this one is swapped for the new key, as when editing one shortcut of several.
+    Replace(&'a str),
+}
+
+/// What an assignment did to the other commands on the key.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Assigned {
+    /// Bindings that lost the key (assigning without keeping conflicts).
+    pub reassigned: Vec<Binding>,
+    /// Bindings that keep the key but no longer run from it in that context: the new binding goes
+    /// ahead of them.
+    pub shadowed: Vec<Binding>,
+}
+
 /// A command that can be bound (engine command or one registered by the frontend).
 #[derive(Clone, Debug, Serialize)]
 pub struct CommandInfo {
@@ -542,8 +563,13 @@ impl Shortcuts {
         v
     }
 
+    /// One bindable command, without building the whole list (the shortcut editor asks for a label
+    /// per drawn key every frame). Engine commands come first, as in [`Self::commands`].
     pub fn command(&self, id: &str) -> Option<CommandInfo> {
-        self.commands().into_iter().find(|c| c.id == id)
+        if let Some(c) = crate::commands::find(id).filter(|c| bindable(c)) {
+            return Some(CommandInfo::new(c.id, c.label, c.menu, c.shortcut));
+        }
+        self.external.iter().find(|c| c.id == id).cloned()
     }
 
     fn known(&self, id: &str) -> bool {
@@ -729,35 +755,124 @@ impl Shortcuts {
     /// replaced. Unless `keep_conflicts`, the key is taken away from any other command bound to it
     /// in the same context (returned as `reassigned`).
     pub fn set(&mut self, command: &str, keys: &str, panel: Option<&str>, add: bool, keep_conflicts: bool) -> std::result::Result<Vec<Binding>, String> {
+        let existing = if add { Existing::Keep } else { Existing::ReplaceAll };
+        self.assign(command, keys, panel, existing, keep_conflicts).map(|r| r.reassigned)
+    }
+
+    /// Assign `keys` to `command` in `panel`'s context (None = application-wide). `existing` says
+    /// what happens to the command's other shortcuts there. Other commands on the same key in that
+    /// context lose it unless `keep_conflicts`; kept, they are returned as `shadowed` and the new
+    /// binding is placed ahead of them, so the key runs the command just assigned (the conflict
+    /// stays listed until it is resolved). Bindings in other contexts are never touched, except the
+    /// panel copies of a replaced application key (#1333).
+    pub fn assign(
+        &mut self,
+        command: &str,
+        keys: &str,
+        panel: Option<&str>,
+        existing: Existing<'_>,
+        keep_conflicts: bool,
+    ) -> std::result::Result<Assigned, String> {
         if !self.known(command) {
             return Err(format!("unknown command `{command}`"));
         }
         let panel = check_panel(panel)?;
         let chord = Chord::parse(keys)?;
         let nb = Binding { command: command.into(), keys: chord.canonical(), panel: panel.map(str::to_string) };
+        let replaced = match existing {
+            Existing::Replace(old) => {
+                let old = Chord::parse(old)?;
+                let ours = |b: &Binding| same_shortcut_command(&b.command, command) && b.context() == nb.context() && b.chord().as_ref() == Some(&old);
+                if !self.bindings.iter().any(ours) {
+                    let shown = old.canonical();
+                    return Err(format!("`{command}` has no shortcut `{shown}` in {} to replace", nb.context()));
+                }
+                Some(old)
+            }
+            _ => None,
+        };
         let before = self.snapshot();
-        if !add {
-            let copies = if nb.panel.is_none() { self.app_chords(command, None) } else { Vec::new() };
-            self.bindings.retain(|b| !(same_shortcut_command(&b.command, command) && (b.context() == nb.context() || is_copy(b, &copies))));
+        match (&existing, &replaced) {
+            (Existing::ReplaceAll, _) => {
+                let copies = if nb.panel.is_none() { self.app_chords(command, None) } else { Vec::new() };
+                self.bindings.retain(|b| !(same_shortcut_command(&b.command, command) && (b.context() == nb.context() || is_copy(b, &copies))));
+            }
+            (Existing::Replace(_), Some(old)) => {
+                // Only the edited key changes, in its place (menus show a command's first key), and
+                // for an application key its panel copies go with it. The command's other keys
+                // and its own panel keys stay.
+                let copies = if nb.panel.is_none() { self.app_chords(command, Some(old)) } else { Vec::new() };
+                let edited = |b: &Binding| same_shortcut_command(&b.command, command) && b.context() == nb.context() && b.chord().as_ref() == Some(old);
+                if let Some(i) = self.bindings.iter().position(edited)
+                    && !self.bindings.contains(&nb)
+                    && let Some(slot) = self.bindings.get_mut(i)
+                {
+                    *slot = nb.clone();
+                }
+                let nb_ref = &nb;
+                self.bindings.retain(|b| b == nb_ref || !(edited(b) || (same_shortcut_command(&b.command, command) && is_copy(b, &copies))));
+            }
+            _ => {}
         }
+        let p = Platform::current();
+        let eff = chord.effective(p);
+        let clash = |b: &Binding| b.command != command && b.context() == nb.context() && b.chord().is_some_and(|c| c.effective(p) == eff);
         let mut reassigned = Vec::new();
-        if !keep_conflicts {
-            let p = Platform::current();
-            let eff = chord.effective(p);
+        let mut shadowed = Vec::new();
+        if keep_conflicts {
+            shadowed = self.bindings.iter().filter(|b| clash(b)).cloned().collect();
+        } else {
             self.bindings.retain(|b| {
-                let clash = b.command != command && b.context() == nb.context() && b.chord().is_some_and(|c| c.effective(p) == eff);
-                if clash {
+                let hit = clash(b);
+                if hit {
                     reassigned.push(b.clone());
                 }
-                !clash
+                !hit
             });
         }
-        if !self.bindings.contains(&nb) {
-            self.bindings.push(nb);
+        // The key runs the first binding on it (`resolve`, the frontends' key maps): ahead of the
+        // bindings it shadows, else in its old place or at the end.
+        let first_clash = self.bindings.iter().position(clash);
+        match (self.bindings.iter().position(|b| *b == nb), first_clash) {
+            (Some(at), Some(c)) if c < at => {
+                let b = self.bindings.remove(at);
+                self.bindings.insert(c, b);
+            }
+            (Some(_), _) => {}
+            (None, Some(c)) => self.bindings.insert(c, nb),
+            (None, None) => self.bindings.push(nb),
         }
         self.modified = true;
         self.changed(before);
-        Ok(reassigned)
+        Ok(Assigned { reassigned, shadowed })
+    }
+
+    /// Resolve a conflict in favour of `command`: the other commands on `keys` in `panel`'s
+    /// context lose that key. Returns the bindings removed.
+    pub fn keep_only(&mut self, command: &str, keys: &str, panel: Option<&str>) -> std::result::Result<Vec<Binding>, String> {
+        let panel = check_panel(panel)?;
+        let chord = Chord::parse(keys)?;
+        let context = panel.unwrap_or(APPLICATION);
+        let p = Platform::current();
+        let eff = chord.effective(p);
+        let on_key = |b: &Binding| b.context() == context && b.chord().is_some_and(|c| c.effective(p) == eff);
+        if !self.bindings.iter().any(|b| same_shortcut_command(&b.command, command) && on_key(b)) {
+            return Err(format!("`{command}` has no shortcut `{}` in {context}", chord.canonical()));
+        }
+        let before = self.snapshot();
+        let mut removed = Vec::new();
+        self.bindings.retain(|b| {
+            let other = !same_shortcut_command(&b.command, command) && on_key(b);
+            if other {
+                removed.push(b.clone());
+            }
+            !other
+        });
+        if !removed.is_empty() {
+            self.modified = true;
+            self.changed(before);
+        }
+        Ok(removed)
     }
 
     /// Remove shortcuts of `command` (one key, or all; in one context, or all).
@@ -937,6 +1052,21 @@ impl Shortcuts {
     /// The shortcut menus show: the first application-wide one.
     pub fn primary(&self, id: &str) -> Option<String> {
         self.bindings.iter().find(|b| same_shortcut_command(&b.command, id) && b.panel.is_none()).map(|b| b.keys.clone())
+    }
+
+    /// [`Self::primary`] of every command at once, for building whole menus (one pass over the
+    /// bindings instead of one per menu item).
+    pub fn primaries(&self) -> std::collections::HashMap<&str, &str> {
+        let mut out = std::collections::HashMap::new();
+        for b in self.bindings.iter().filter(|b| b.panel.is_none()) {
+            out.entry(b.command.as_str()).or_insert(b.keys.as_str());
+            if shortcut_twins(&b.command) {
+                for twin in ["file.close", "sequence.close"] {
+                    out.entry(twin).or_insert(b.keys.as_str());
+                }
+            }
+        }
+        out
     }
 
     /// The command a chord runs with `panel` focused (panel shortcuts first).
@@ -1147,16 +1277,35 @@ pub fn commands() -> Vec<CommandSpec> {
             let bs: Vec<Value> = s.shortcuts.for_command(id).into_iter().map(|b| s.shortcuts.binding_json(b, plat)).collect();
             Ok(json!({"id": c.id, "label": c.label, "category": c.category, "shortcuts": bs}))
         }),
-        sc!("shortcuts.set", "Assign Shortcut", r#"{"command":id,"keys":"Cmd+Shift+K","panel":str?,"add":bool?,"keepConflicts":bool?}"#, true, |s, p| {
-            let id = str_p(p, "command").ok_or_else(|| bad("shortcuts.set", "need `command`"))?;
-            let keys = str_p(p, "keys").ok_or_else(|| bad("shortcuts.set", "need `keys`"))?;
-            let r = s
-                .shortcuts
-                .set(id, keys, str_p(p, "panel"), bool_p(p, "add").unwrap_or(false), bool_p(p, "keepConflicts").unwrap_or(false))
-                .map_err(err("shortcuts.set"))?;
-            let plat = Platform::current();
-            let conflicts: Vec<Value> = s.shortcuts.conflicts(plat).into_iter().map(|(c, k, v)| json!({"context": c, "keys": k, "commands": v})).collect();
-            Ok(json!({"keys": normalize(keys).unwrap_or_default(), "reassigned": r, "conflicts": conflicts}))
+        sc!(
+            "shortcuts.set",
+            "Assign Shortcut",
+            r#"{"command":id,"keys":"Cmd+Shift+K","panel":str?,"add":bool?,"replace":"Cmd+K"?,"keepConflicts":bool?}"#,
+            true,
+            |s, p| {
+                let id = str_p(p, "command").ok_or_else(|| bad("shortcuts.set", "need `command`"))?;
+                let keys = str_p(p, "keys").ok_or_else(|| bad("shortcuts.set", "need `keys`"))?;
+                let replace = match p.get("replace") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_str().ok_or_else(|| bad("shortcuts.set", "`replace` must be the keys of one of the command's shortcuts"))?),
+                };
+                let existing = match (replace, bool_p(p, "add").unwrap_or(false)) {
+                    (Some(_), true) => return Err(bad("shortcuts.set", "`add` and `replace` cannot be combined")),
+                    (Some(old), false) => Existing::Replace(old),
+                    (None, true) => Existing::Keep,
+                    (None, false) => Existing::ReplaceAll,
+                };
+                let r = s.shortcuts.assign(id, keys, str_p(p, "panel"), existing, bool_p(p, "keepConflicts").unwrap_or(false)).map_err(err("shortcuts.set"))?;
+                let plat = Platform::current();
+                let conflicts: Vec<Value> = s.shortcuts.conflicts(plat).into_iter().map(|(c, k, v)| json!({"context": c, "keys": k, "commands": v})).collect();
+                Ok(json!({"keys": normalize(keys).unwrap_or_default(), "reassigned": r.reassigned, "shadowed": r.shadowed, "conflicts": conflicts}))
+            }
+        ),
+        sc!("shortcuts.keepOnly", "Resolve Shortcut Conflict", r#"{"command":id,"keys":"Cmd+K","panel":str?}"#, true, |s, p| {
+            let id = str_p(p, "command").ok_or_else(|| bad("shortcuts.keepOnly", "need `command`"))?;
+            let keys = str_p(p, "keys").ok_or_else(|| bad("shortcuts.keepOnly", "need `keys`"))?;
+            let removed = s.shortcuts.keep_only(id, keys, str_p(p, "panel")).map_err(err("shortcuts.keepOnly"))?;
+            Ok(json!({"removed": removed}))
         }),
         sc!("shortcuts.clear", "Clear Shortcut", r#"{"command":id,"keys":str?,"panel":str?}"#, true, |s, p| {
             let id = str_p(p, "command").ok_or_else(|| bad("shortcuts.clear", "need `command`"))?;

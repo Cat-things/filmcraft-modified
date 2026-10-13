@@ -20,8 +20,8 @@
 	Add Audio Submix Track	Ajouter une piste de sous-mixage audio
 	Add Caption at Playhead	Ajouter un sous-titre à la tête de lecture
 	Add Chapter Marker…	Ajouter un marqueur de chapitre…
-	Add Edit	Ajouter un point de montage
-	Add Edit to All Tracks	Ajouter un point de montage à toutes les pistes
+	Cut/Split	Couper/Scinder
+	Cut/Split All Tracks	Couper/Scinder toutes les pistes
 	Add Flash Cue Marker…	Ajouter un marqueur de point de repère Flash…
 	Add Frame Hold	Ajouter une image figée
 	Add Guide…	Ajouter un repère…
@@ -2873,7 +2873,11 @@
 	Assign {key} to {command}	Attribuer {key} à {command}
 	Conflict: {key} is assigned to {commands} ({ctx})	Conflit : {key} est attribué à {commands} ({ctx})
 	 and 	 et 
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	Cliquez sur la cellule Raccourci d'une commande et appuyez sur des touches pour l'attribuer ; + ajoute un autre raccourci.
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	Cliquez sur un raccourci pour le modifier, sur la partie vide de la cellule ou sur + pour en ajouter un, ou faites glisser une commande sur une touche.
+	 (also on {list}; {command} runs first)	 (aussi sur {list} ; {command} est prioritaire)
+	Use for {command} only	Réserver à {command}
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	Déposez la commande sur une touche pour l'attribuer ; maintenez ou sélectionnez des modificateurs pour une combinaison.
+	Click to change this shortcut	Cliquez pour modifier ce raccourci
 	Cleared {n} shortcut(s) of {command}	{n} raccourci(s) de {command} effacé(s)
 	No export preset named `{name}`	Aucun préréglage d'exportation nommé `{name}`
 	Open a sequence to export	Ouvrez une séquence à exporter
@@ -3577,3 +3581,5 @@
 	Export the labels to a preset file…	Exporter les étiquettes dans un fichier de paramètre prédéfini…
 	Show the presets folder	Afficher le dossier des paramètres prédéfinis
 	Delete this preset	Supprimer ce paramètre prédéfini
+	Undock Panels into Separate Windows	Détacher les panneaux dans des fenêtres séparées
+	Dock Panel	Ancrer le panneau

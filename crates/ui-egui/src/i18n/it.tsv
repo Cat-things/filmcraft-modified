@@ -18,8 +18,8 @@
 	Add Audio Submix Track	Aggiungi traccia submix audio
 	Add Caption at Playhead	Aggiungi sottotitolo all'indicatore di riproduzione
 	Add Chapter Marker…	Aggiungi marcatore di capitolo…
-	Add Edit	Aggiungi taglio
-	Add Edit to All Tracks	Aggiungi taglio a tutte le tracce
+	Cut/Split	Taglia/Dividi
+	Cut/Split All Tracks	Taglia/Dividi tutte le tracce
 	Add Flash Cue Marker…	Aggiungi marcatore Flash Cue…
 	Add Frame Hold	Aggiungi fermo immagine
 	Add Guide…	Aggiungi guida…
@@ -2870,7 +2870,11 @@
 	Assign {key} to {command}	Assegna {key} a {command}
 	Conflict: {key} is assigned to {commands} ({ctx})	Conflitto: {key} è assegnato a {commands} ({ctx})
 	 and 	 e 
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	Fai clic sulla cella Scorciatoia di un comando e premi i tasti per assegnarla; + aggiunge un'altra scorciatoia.
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	Fai clic su una scorciatoia per cambiarla, sulla parte vuota della cella o su + per aggiungerne una, oppure trascina un comando su un tasto.
+	 (also on {list}; {command} runs first)	 (anche su {list}; {command} ha la precedenza)
+	Use for {command} only	Usa solo per {command}
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	Rilascia il comando su un tasto per assegnarlo; tieni premuti o seleziona i modificatori per una combinazione.
+	Click to change this shortcut	Fai clic per cambiare questa scorciatoia
 	Cleared {n} shortcut(s) of {command}	Cancellate {n} scorciatoie di {command}
 	No export preset named `{name}`	Nessun predefinito di esportazione chiamato `{name}`
 	Open a sequence to export	Apri una sequenza da esportare
@@ -3601,3 +3605,4 @@
 	Shows the version, community links and credits in a FilmCraft window.	Mostra la versione, i link della community e i riconoscimenti in una finestra di FilmCraft.
 	Couldn't open your web browser	Impossibile aprire il browser web
 	Open this address in your browser yourself:	Apri tu questo indirizzo nel browser:
+	Undock Panels into Separate Windows	Sgancia i pannelli in finestre separate

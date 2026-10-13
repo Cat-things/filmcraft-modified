@@ -18,8 +18,8 @@
 	Add Audio Submix Track	Añadir pista de submezcla de audio
 	Add Caption at Playhead	Añadir subtítulo en el cabezal
 	Add Chapter Marker…	Añadir marcador de capítulo…
-	Add Edit	Añadir edición
-	Add Edit to All Tracks	Añadir edición a todas las pistas
+	Cut/Split	Cortar/Dividir
+	Cut/Split All Tracks	Cortar/Dividir todas las pistas
 	Add Flash Cue Marker…	Añadir marcador de referencia Flash…
 	Add Frame Hold	Añadir fotograma congelado
 	Add Guide…	Añadir guía…
@@ -2876,7 +2876,11 @@
 	Assign {key} to {command}	Asignar {key} a {command}
 	Conflict: {key} is assigned to {commands} ({ctx})	Conflicto: {key} está asignada a {commands} ({ctx})
 	 and 	 y 
-	Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.	Haz clic en la celda Atajo de un comando y pulsa las teclas para asignarlo; + añade otro atajo.
+	Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.	Haz clic en un atajo para cambiarlo, en la parte vacía de la celda o en + para añadir uno, o arrastra un comando a una tecla.
+	 (also on {list}; {command} runs first)	 (también en {list}; {command} tiene prioridad)
+	Use for {command} only	Usar solo para {command}
+	Drop the command on a key to assign it; hold or select modifiers for a chord.	Suelta el comando en una tecla para asignarlo; mantén o selecciona modificadores para una combinación.
+	Click to change this shortcut	Haz clic para cambiar este atajo
 	Cleared {n} shortcut(s) of {command}	Se borraron {n} atajo(s) de {command}
 	No export preset named `{name}`	No hay ningún ajuste preestablecido de exportación llamado `{name}`
 	Open a sequence to export	Abre una secuencia para exportar
@@ -3610,3 +3614,4 @@
 	Shows the version, community links and credits in a FilmCraft window.	Muestra la versión, los enlaces de la comunidad y los créditos en una ventana de FilmCraft.
 	Couldn't open your web browser	No se pudo abrir el navegador web
 	Open this address in your browser yourself:	Abre esta dirección tú mismo en el navegador:
+	Undock Panels into Separate Windows	Desacoplar paneles en ventanas separadas

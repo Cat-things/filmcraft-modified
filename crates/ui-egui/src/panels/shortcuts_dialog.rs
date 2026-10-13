@@ -1,15 +1,23 @@
 //! Edit ▸ Keyboard Shortcuts… (⌥⌘K): a keyboard drawn in code with every assigned key coloured
 //! (application-wide / panel-specific / both), a searchable command list with a shortcut column
-//! (click it and press keys to assign; "+" adds another shortcut), the "Key:" detail list,
-//! conflict warnings, preset load / Save As / Delete / Export / Import, and Undo / Redo / Clear.
-//! Edits apply live (menus update immediately); Cancel restores the set the dialog opened with.
+//! (each shortcut is a chip: click one and press keys to change just that one; the empty part of
+//! the cell and "+" add another), dragging a command from the list onto a key of the keyboard
+//! (with the modifiers held or selected) to assign it, the "Key:" detail list, conflict warnings,
+//! preset load / Save As / Delete / Export / Import, and Undo / Redo / Clear. Edits apply live
+//! (menus update immediately); Cancel restores the set the dialog opened with.
+//!
+//! Assigning a key never takes it away from the other commands that use it: the conflict is
+//! listed under the keyboard (the new assignment runs first) with a button to keep the key for one
+//! command only.
 //!
 //! All state lives in the engine's shortcut set (`shortcuts.*` commands), so agents can do the
 //! same over MCP. Automation ids: `shortcuts.preset`, `shortcuts.preset.<name>`, `shortcuts.saveAs`,
 //! `shortcuts.saveAs.name`, `shortcuts.saveAs.ok`, `shortcuts.delete`, `shortcuts.export`,
 //! `shortcuts.import`, `shortcuts.context`, `shortcuts.context.<panel>`, `shortcuts.search`,
-//! `shortcuts.key.<Key>`, `shortcuts.mod.<Cmd|Ctrl|Alt|Shift>`, `shortcuts.row.<command>`,
-//! `shortcuts.cell.<command>` (click = record), `shortcuts.add.<command>`, `shortcuts.assignKey`,
+//! `shortcuts.key.<Key>`, `shortcuts.mod.<Cmd|Ctrl|Alt|Shift>`, `shortcuts.row.<command>` (drag it
+//! onto a `shortcuts.key.<Key>`), `shortcuts.chip.<command>.<i>` (click = record a replacement),
+//! `shortcuts.cell.<command>` (the cell's empty part: click = record another shortcut),
+//! `shortcuts.add.<command>`, `shortcuts.assignKey`, `shortcuts.conflict.keep.<i>`,
 //! `shortcuts.undo`, `shortcuts.redo`, `shortcuts.clear`, `shortcuts.cancel`, `shortcuts.ok`.
 
 use egui::text::LayoutJob;
@@ -36,8 +44,10 @@ pub struct EditorState {
     /// "Application" or a panel name (which panel's shortcuts the keyboard and assignments use).
     pub context: String,
     pub selected: Option<String>,
-    /// Waiting for a key press: (command, add instead of replace).
-    pub recording: Option<(String, bool)>,
+    /// Waiting for a key press for this command.
+    pub recording: Option<Recording>,
+    /// A command being dragged from the list onto the drawn keyboard.
+    pub dragging: Option<String>,
     /// Modifier filter toggled on the drawn keyboard.
     pub mods: Mods,
     /// Key whose assignments the "Key:" list shows.
@@ -50,6 +60,22 @@ pub struct EditorState {
 impl EditorState {
     fn panel(&self) -> Option<&str> {
         if self.context.is_empty() || self.context == APPLICATION { None } else { Some(self.context.as_str()) }
+    }
+}
+
+/// A shortcut cell waiting for keys.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Recording {
+    pub command: String,
+    /// The shortcut the keys replace, as (keys, panel); None adds one in the editor's context.
+    pub replace: Option<(String, Option<String>)>,
+}
+
+impl Recording {
+    /// Record another shortcut for `command`.
+    pub fn add(command: &str) -> Self {
+        Recording { command: command.into(), replace: None }
     }
 }
 
@@ -91,16 +117,31 @@ fn exec(app: &mut FilmcraftApp, cmd: &str, params: Value) -> Option<Value> {
     }
 }
 
-/// Assign a recorded chord.
-fn assign(app: &mut FilmcraftApp, command: &str, keys: &str, add: bool) {
-    let panel = app.shortcut_editor.panel().map(str::to_string);
+/// Assign `keys` to `command`: in place of the shortcut `replace` names (keys, panel), else as one
+/// more shortcut in the editor's context. Other commands on the key keep it (the conflict is
+/// shown and the new assignment runs first): changing a shortcut never removes keys elsewhere.
+fn assign(app: &mut FilmcraftApp, command: &str, keys: &str, replace: Option<&(String, Option<String>)>) {
+    let params = match replace {
+        Some((old, panel)) => json!({"command": command, "keys": keys, "panel": panel, "replace": old, "keepConflicts": true}),
+        None => json!({"command": command, "keys": keys, "panel": app.shortcut_editor.panel(), "add": true, "keepConflicts": true}),
+    };
     let p = Platform::current();
-    if let Some(r) = exec(app, "shortcuts.set", json!({"command": command, "keys": keys, "panel": panel, "add": add})) {
+    if let Some(r) = exec(app, "shortcuts.set", params) {
         let disp = Chord::parse(keys).map(|c| c.display(p)).unwrap_or_else(|_| keys.into());
-        let mut msg = format!("{disp} → {}", label_of(app, command));
-        let moved: Vec<String> = r["reassigned"].as_array().into_iter().flatten().filter_map(|b| b["command"].as_str().map(|c| label_of(app, c))).collect();
+        let label = label_of(app, command);
+        let mut msg = format!("{disp} → {label}");
+        let names = |key: &str| -> Vec<String> {
+            let mut v: Vec<String> = r[key].as_array().into_iter().flatten().filter_map(|b| b["command"].as_str().map(|c| label_of(app, c))).collect();
+            v.dedup();
+            v
+        };
+        let moved = names("reassigned");
         if !moved.is_empty() {
             msg.push_str(&tlf!(" (removed from {list})", list = moved.join(", ")));
+        }
+        let shadowed = names("shadowed");
+        if !shadowed.is_empty() {
+            msg.push_str(&tlf!(" (also on {list}; {command} runs first)", list = shadowed.join(", "), command = label));
         }
         app.shortcut_editor.message = msg;
     }
@@ -116,7 +157,7 @@ fn is_modifier_key(key: egui::Key) -> bool {
 /// Take the next key press while recording (Esc cancels). Modifier keys on their own are skipped:
 /// the chord is recorded when the key they modify is pressed, with them as its modifiers.
 fn record(app: &mut FilmcraftApp, ctx: &egui::Context) {
-    let Some((cmd, add)) = app.shortcut_editor.recording.clone() else { return };
+    let Some(rec) = app.shortcut_editor.recording.clone() else { return };
     let got = ctx.input_mut(|i| {
         let mut got = None;
         i.events.retain(|e| match e {
@@ -136,7 +177,7 @@ fn record(app: &mut FilmcraftApp, ctx: &egui::Context) {
         return;
     }
     match chord_of(key, m) {
-        Some(k) => assign(app, &cmd, &k, add),
+        Some(k) => assign(app, &rec.command, &k, rec.replace.as_ref()),
         None => app.shortcut_editor.message = tlf!("{key} can't be used as a shortcut", key = format!("{key:?}")),
     }
 }
@@ -183,6 +224,7 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
             ui.add_space(6.0);
             close = footer(app, ui, &t);
         });
+    drag_ghost(app, ctx, &t);
     if !open {
         close = Some(false);
     }
@@ -194,10 +236,29 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
                 app.session.shortcuts.cancel_editing();
             }
             app.shortcut_editor.recording = None;
+            app.shortcut_editor.dragging = None;
             false
         }
         None => true,
     }
+}
+
+/// The command being dragged onto the keyboard follows the pointer; the drag ends when the button
+/// is released (a release over a key was handled by [`keyboard`]) or with Esc.
+fn drag_ghost(app: &mut FilmcraftApp, ctx: &egui::Context, t: &Tokens) {
+    let Some(cmd) = app.shortcut_editor.dragging.clone() else { return };
+    if ctx.input(|i| !i.pointer.primary_down() || i.key_pressed(egui::Key::Escape)) {
+        app.shortcut_editor.dragging = None;
+        return;
+    }
+    let Some(pos) = ctx.pointer_latest_pos() else { return };
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("shortcuts-drag")));
+    let title = painter.layout_no_wrap(label_of(app, &cmd), Tokens::ui(12.0), Color32::WHITE);
+    let ghost = Rect::from_min_size(pos + vec2(12.0, 10.0), title.size() + vec2(16.0, 8.0));
+    painter.rect_filled(ghost, 4.0, t.accent.gamma_multiply(0.9));
+    painter.galley(ghost.min + vec2(8.0, 4.0), title, Color32::WHITE);
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    ctx.request_repaint();
 }
 
 fn small_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, id: &str, label: &str, enabled: bool) -> bool {
@@ -465,9 +526,17 @@ fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, t: &Tokens) {
     let origin = area.min;
     let mut clicked_key: Option<String> = None;
     let mut toggled: Option<&str> = None;
+    // a command dragged from the list lands on the key under the pointer when the button is released
+    let dragging = app.shortcut_editor.dragging.clone();
+    let (pointer, released) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.primary_released()));
+    let mut dropped: Option<String> = None;
     let mut draw = |ui: &mut egui::Ui, r: Rect, name: &str| {
         let r = r.shrink(gap / 2.0);
         let is_mod = name.starts_with('#');
+        let drop_here = dragging.is_some() && !is_mod && pointer.is_some_and(|p| r.contains(p));
+        if drop_here && released {
+            dropped = Some(name.to_string());
+        }
         let (app_cmd, panel_cmd) = map.get(name).cloned().unwrap_or_default();
         let mod_on = match name {
             "#Shift" => mods.shift,
@@ -499,7 +568,10 @@ fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, t: &Tokens) {
             // both: lower-right triangle in the panel colour
             p.add(egui::Shape::convex_polygon(vec![r.right_top(), r.right_bottom(), r.left_bottom()], PANEL_KEY, Stroke::NONE));
         }
-        if resp.hovered() {
+        if drop_here {
+            p.rect_filled(r, CornerRadius::same(3), t.accent.gamma_multiply(0.45));
+            p.rect_stroke(r, CornerRadius::same(3), Stroke::new(2.5, t.accent), StrokeKind::Inside);
+        } else if resp.hovered() {
             p.rect_stroke(r, CornerRadius::same(3), Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
         }
         if app.shortcut_editor.key.as_deref() == Some(name) {
@@ -560,6 +632,14 @@ fn keyboard(app: &mut FilmcraftApp, ui: &mut egui::Ui, area: Rect, t: &Tokens) {
         for (name, off) in row.iter() {
             draw(ui, Rect::from_min_size(pos2(nav_x + off * u, y), vec2(u, row_h)), name);
         }
+    }
+    // modifier keys and Caps Lock (`#…`) never take a drop
+    if let (Some(cmd), Some(key)) = (dragging, dropped) {
+        app.shortcut_editor.dragging = None;
+        app.shortcut_editor.selected = Some(cmd.clone());
+        app.shortcut_editor.key = Some(key.clone());
+        // the layer the keyboard shows: toggled modifiers plus the ones held while dropping
+        assign(app, &cmd, &format!("{}{}", mods.prefix(), key), None);
     }
     let ed = &mut app.shortcut_editor;
     if let Some(m) = toggled {
@@ -623,7 +703,7 @@ fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Toke
                 ui.painter().text(cr.left_center() + vec2(20.0, 0.0), Align2::LEFT_CENTER, crate::i18n::t(&cat), Tokens::semibold(12.0), t.text);
                 last_cat = cat;
             }
-            let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click_and_drag());
             let selected = app.shortcut_editor.selected.as_deref() == Some(id.as_str());
             let bg = if selected {
                 t.row_selected
@@ -644,37 +724,77 @@ fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Toke
             if resp.clicked() {
                 app.shortcut_editor.selected = Some(id.clone());
             }
-            // shortcut cell: click to record (replace); "+" adds another
-            let cell = Rect::from_min_max(pos2(r.min.x + w * 0.58, r.min.y + 2.0), pos2(r.max.x - 34.0, r.max.y - 2.0));
-            let recording = app.shortcut_editor.recording.as_ref().is_some_and(|(c, _)| *c == id);
-            let text = if recording {
-                tl!("Type a shortcut… (Esc cancels)").to_string()
-            } else {
-                row["shortcuts"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|b| {
-                        let d = b["display"].as_str().unwrap_or("").to_string();
-                        match b["panel"].as_str() {
-                            Some(pn) => format!("{d} ({pn})"),
-                            None => d,
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",  ")
-            };
-            let cresp = ui.interact(cell, egui::Id::new(("shortcut-cell", &id)), Sense::click());
-            if recording {
-                ui.painter().rect(cell, 3.0, t.field_bg, Stroke::new(1.5, t.accent), StrokeKind::Inside);
-            } else if cresp.hovered() {
-                ui.painter().rect_stroke(cell, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
-            }
-            ui.painter().text(cell.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, &text, Tokens::ui(12.5), if recording { t.accent } else { t.hot_text });
-            app.auto.add(&format!("shortcuts.cell.{id}"), cell, &text);
-            if cresp.clicked() {
+            // drag the command onto a key of the keyboard to assign it there
+            if resp.drag_started() {
                 app.shortcut_editor.selected = Some(id.clone());
-                app.shortcut_editor.recording = Some((id.clone(), false));
+                app.shortcut_editor.dragging = Some(id.clone());
+                app.shortcut_editor.recording = None;
+            }
+            // shortcut cell: one chip per shortcut (click = change that one); the empty part adds one
+            let cell = Rect::from_min_max(pos2(r.min.x + w * 0.58, r.min.y + 2.0), pos2(r.max.x - 34.0, r.max.y - 2.0));
+            let recording = app.shortcut_editor.recording.as_ref().filter(|rec| rec.command == id).cloned();
+            let bindings: Vec<(String, Option<String>, String)> = row["shortcuts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|b| {
+                    let d = b["display"].as_str().unwrap_or("").to_string();
+                    let panel = b["panel"].as_str().map(str::to_string);
+                    let text = match &panel {
+                        Some(pn) => format!("{d} ({})", crate::i18n::t(pn)),
+                        None => d,
+                    };
+                    (b["keys"].as_str().unwrap_or("").to_string(), panel, text)
+                })
+                .collect();
+            let cresp = ui.interact(cell, egui::Id::new(("shortcut-cell", &id)), Sense::click());
+            let clip = ui.painter().with_clip_rect(cell.intersect(ui.clip_rect()));
+            let mut x = cell.min.x + 2.0;
+            let mut chip_clicked: Option<(String, Option<String>)> = None;
+            for (ci, (keys, panel, text)) in bindings.iter().enumerate() {
+                let editing = recording.as_ref().and_then(|rec| rec.replace.as_ref()).is_some_and(|(k, p)| k == keys && p == panel);
+                let shown = if editing { tl!("Type a shortcut… (Esc cancels)").to_string() } else { text.clone() };
+                let galley = ui.painter().layout_no_wrap(shown.clone(), Tokens::ui(12.5), if editing { t.accent } else { t.hot_text });
+                let chip = Rect::from_min_size(pos2(x, cell.min.y + 1.0), vec2(galley.size().x + 12.0, cell.height() - 2.0));
+                x = chip.max.x + 4.0;
+                if chip.min.x >= cell.max.x {
+                    break;
+                }
+                let chip_id = format!("shortcuts.chip.{id}.{ci}");
+                let cr = ui
+                    .interact(chip.intersect(cell), egui::Id::new(("shortcut-chip", &id, ci)), Sense::click())
+                    .on_hover_text(tl!("Click to change this shortcut"));
+                let stroke = if editing {
+                    Stroke::new(1.5, t.accent)
+                } else if cr.hovered() {
+                    Stroke::new(1.0, t.accent)
+                } else {
+                    Stroke::new(1.0, t.field_border)
+                };
+                clip.rect(chip, 3.0, t.field_bg, stroke, StrokeKind::Inside);
+                clip.galley(pos2(chip.min.x + 6.0, chip.center().y - galley.size().y / 2.0), galley, t.hot_text);
+                app.auto.add(&chip_id, chip.intersect(cell), &shown);
+                if cr.clicked() {
+                    chip_clicked = Some((keys.clone(), panel.clone()));
+                }
+            }
+            // the empty rest of the cell records another shortcut
+            let adding = recording.as_ref().is_some_and(|rec| rec.replace.is_none());
+            let rest = Rect::from_min_max(pos2(x.min(cell.max.x - 8.0), cell.min.y), cell.max);
+            if adding {
+                clip.rect(rest, 3.0, t.field_bg, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+                clip.text(rest.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, tl!("Type a shortcut… (Esc cancels)"), Tokens::ui(12.5), t.accent);
+            } else if cresp.hovered() {
+                clip.rect_stroke(rest, 3.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside);
+            }
+            let cell_text = bindings.iter().map(|(_, _, s)| s.as_str()).collect::<Vec<_>>().join(",  ");
+            app.auto.add(&format!("shortcuts.cell.{id}"), rest, &cell_text);
+            if let Some(replace) = chip_clicked {
+                app.shortcut_editor.selected = Some(id.clone());
+                app.shortcut_editor.recording = Some(Recording { command: id.clone(), replace: Some(replace) });
+            } else if cresp.clicked() {
+                app.shortcut_editor.selected = Some(id.clone());
+                app.shortcut_editor.recording = Some(Recording::add(&id));
             }
             let plus = Rect::from_min_size(pos2(r.max.x - 30.0, r.min.y + 3.0), vec2(20.0, 20.0));
             let presp = ui.interact(plus, egui::Id::new(("shortcut-add", &id)), Sense::click()).on_hover_text(tl!("Add another shortcut"));
@@ -688,7 +808,7 @@ fn command_list(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Toke
             app.auto.add(&format!("shortcuts.add.{id}"), plus, "Add shortcut");
             if presp.clicked() {
                 app.shortcut_editor.selected = Some(id.clone());
-                app.shortcut_editor.recording = Some((id.clone(), true));
+                app.shortcut_editor.recording = Some(Recording::add(&id));
             }
         }
         if rows.is_empty() {
@@ -752,7 +872,7 @@ fn key_detail(app: &mut FilmcraftApp, ui: &mut egui::Ui, height: f32, t: &Tokens
         let disp = Chord::parse(&keys).map(|c| c.display(plat)).unwrap_or(keys.clone());
         let label = tlf!("Assign {key} to {command}", key = disp, command = label_of(app, &cmd));
         if small_button(app, ui, "shortcuts.assignKey", &label, true) {
-            assign(app, &cmd, &keys, false);
+            assign(app, &cmd, &keys, None);
         }
     }
 }
@@ -765,18 +885,31 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) -> Option<bool>
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.set_width(ui.available_width() - 420.0);
-            for (ctx, keys, cmds) in conflicts.iter().take(2) {
+            for (i, (ctx, keys, cmds)) in conflicts.iter().take(2).enumerate() {
                 let disp = Chord::parse(keys).map(|c| c.display(plat)).unwrap_or(keys.clone());
                 let names: Vec<String> = cmds.iter().map(|c| label_of(app, c)).collect();
-                let r = ui.label(
-                    RichText::new(tlf!("Conflict: {key} is assigned to {commands} ({ctx})", key = disp, commands = names.join(tl!(" and ")), ctx))
-                        .size(12.0)
-                        .color(WARN),
-                );
-                app.auto.add("shortcuts.conflict", r.rect, "conflict");
+                ui.horizontal(|ui| {
+                    let r = ui.label(
+                        RichText::new(tlf!("Conflict: {key} is assigned to {commands} ({ctx})", key = disp, commands = names.join(tl!(" and ")), ctx))
+                            .size(12.0)
+                            .color(WARN),
+                    );
+                    app.auto.add("shortcuts.conflict", r.rect, "conflict");
+                    // the key runs the first of them; keep it for that one only
+                    if let (Some(winner), Some(name)) = (cmds.first(), names.first()) {
+                        let label = tlf!("Use for {command} only", command = name);
+                        if small_button(app, ui, &format!("shortcuts.conflict.keep.{i}"), &label, true)
+                            && exec(app, "shortcuts.keepOnly", json!({"command": winner, "keys": keys, "panel": ctx})).is_some()
+                        {
+                            app.shortcut_editor.message = format!("{disp} → {name}");
+                        }
+                    }
+                });
             }
-            let msg = if app.shortcut_editor.message.is_empty() {
-                tl!("Click a command's Shortcut cell and press keys to assign it; + adds another shortcut.").to_string()
+            let msg = if app.shortcut_editor.dragging.is_some() {
+                tl!("Drop the command on a key to assign it; hold or select modifiers for a chord.").to_string()
+            } else if app.shortcut_editor.message.is_empty() {
+                tl!("Click a shortcut to change it, the empty part of the cell or + to add one, or drag a command onto a key.").to_string()
             } else {
                 app.shortcut_editor.message.clone()
             };
